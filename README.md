@@ -1,6 +1,6 @@
 [![Crates.io](https://img.shields.io/crates/v/udf-forensic.svg)](https://crates.io/crates/udf-forensic)
 [![docs.rs](https://img.shields.io/docsrs/udf-forensic)](https://docs.rs/udf-forensic)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/SecurityRonin/udf-forensic/actions/workflows/ci.yml/badge.svg)](https://github.com/SecurityRonin/udf-forensic/actions)
 [![Sponsor](https://img.shields.io/badge/sponsor-h4x0r-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/h4x0r)
 
