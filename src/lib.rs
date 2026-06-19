@@ -16,7 +16,7 @@
 //!
 //! All physical LBAs satisfy: `phys_lba = partition_start + logical_block_num`.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 
 // ── ECMA-167 / UDF tag identifiers ───────────────────────────────────────────
 
@@ -84,6 +84,7 @@ pub enum UdfPartitionKind {
 
 // ── Internal UDF state ────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct UdfState {
     pub partition_start: u32,
     pub root_fe_lba: u32,
@@ -121,16 +122,45 @@ pub fn detect_udf<R: Read + Seek>(reader: &mut R) -> bool {
 
 /// Try to parse the AVDP → VDS → FSD chain, returning state needed for
 /// directory traversal. Returns `None` if the image lacks a valid UDF structure.
+///
+/// Lenient wrapper over [`parse_udf_state_checked`]: a real seek/read I/O error
+/// reading the anchor/VDS/FSD is folded into `None`, indistinguishable from a
+/// structural "not UDF". Use [`parse_udf_state_checked`] when a truncated or
+/// unreadable image must be told apart from a genuine non-UDF source.
 pub fn parse_udf_state<R: Read + Seek>(reader: &mut R) -> Option<UdfState> {
-    let (vds_loc, vds_len) = read_avdp(reader)?;
-    let vds = read_vds(reader, vds_loc, vds_len)?;
-    let root_fe_lba = read_fsd(reader, vds.fsd_lba, vds.partition_start)?;
-    Some(UdfState {
+    parse_udf_state_checked(reader).ok().flatten()
+}
+
+/// Parse the AVDP → VDS → FSD bootstrap chain, distinguishing a real read
+/// failure from a structural negative.
+///
+/// - `Err(io)` — a seek/read I/O error reading the anchor (LBA 256), the Volume
+///   Descriptor Sequence, or the File Set Descriptor. This includes
+///   [`io::ErrorKind::UnexpectedEof`] when the image is truncated before the
+///   anchor, which is itself forensically suspicious and must surface rather
+///   than masquerade as "not UDF".
+/// - `Ok(None)` — every read succeeded but the structure is not valid UDF (the
+///   anchor tag is not an AVDP, or the descriptor chain is absent/incoherent).
+///   This is the legitimate "not UDF" case.
+/// - `Ok(Some(state))` — a valid UDF structure.
+pub fn parse_udf_state_checked<R: Read + Seek>(
+    reader: &mut R,
+) -> Result<Option<UdfState>, io::Error> {
+    let Some((vds_loc, vds_len)) = read_avdp_checked(reader)? else {
+        return Ok(None);
+    };
+    let Some(vds) = read_vds_checked(reader, vds_loc, vds_len)? else {
+        return Ok(None);
+    };
+    let Some(root_fe_lba) = read_fsd_checked(reader, vds.fsd_lba, vds.partition_start)? else {
+        return Ok(None);
+    };
+    Ok(Some(UdfState {
         partition_start: vds.partition_start,
         root_fe_lba,
         partition_kind: vds.partition_kind,
         partition_map_count: vds.map_count,
-    })
+    }))
 }
 
 /// Resolved Volume Descriptor Sequence information.
@@ -261,23 +291,29 @@ pub fn read_fe_data<R: Read + Seek>(
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Parse AVDP at LBA 256. Returns (vds_location, vds_length).
-fn read_avdp<R: Read + Seek>(reader: &mut R) -> Option<(u32, u32)> {
+/// Parse AVDP at LBA 256. `Err` on a read I/O failure, `Ok(None)` when the
+/// anchor read succeeds but is not an AVDP, `Ok(Some((vds_loc, vds_len)))` when
+/// the anchor is valid.
+fn read_avdp_checked<R: Read + Seek>(reader: &mut R) -> Result<Option<(u32, u32)>, io::Error> {
     let mut sector = [0u8; 2048];
-    seek_read(reader, 256 * 2048, &mut sector)?;
+    seek_read_checked(reader, 256 * 2048, &mut sector)?;
     if u16::from_le_bytes([sector[0], sector[1]]) != TAG_AVDP {
-        return None;
+        return Ok(None);
     }
     let vds_len = u32::from_le_bytes(sector[16..20].try_into().unwrap());
     let vds_loc = u32::from_le_bytes(sector[20..24].try_into().unwrap());
-    Some((vds_loc, vds_len))
+    Ok(Some((vds_loc, vds_len)))
 }
 
 /// Scan the Volume Descriptor Sequence: collect every Partition Descriptor
 /// (partition number → starting location) and the Logical Volume Descriptor
 /// (file-set location, partition reference, and partition maps), then resolve
 /// the file set's partition through its map.
-fn read_vds<R: Read + Seek>(reader: &mut R, vds_loc: u32, vds_len: u32) -> Option<VdsInfo> {
+fn read_vds_checked<R: Read + Seek>(
+    reader: &mut R,
+    vds_loc: u32,
+    vds_len: u32,
+) -> Result<Option<VdsInfo>, io::Error> {
     use std::collections::HashMap;
     let sectors = (vds_len as usize).div_ceil(2048);
 
@@ -289,7 +325,7 @@ fn read_vds<R: Read + Seek>(reader: &mut R, vds_loc: u32, vds_len: u32) -> Optio
 
     for i in 0..sectors {
         let mut sector = [0u8; 2048];
-        seek_read(reader, (vds_loc as u64 + i as u64) * 2048, &mut sector)?;
+        seek_read_checked(reader, (vds_loc as u64 + i as u64) * 2048, &mut sector)?;
         let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
         match tag_ident {
             TAG_PD => {
@@ -309,7 +345,10 @@ fn read_vds<R: Read + Seek>(reader: &mut R, vds_loc: u32, vds_len: u32) -> Optio
         }
     }
 
-    let fsd = fsd_lbn?;
+    // Reads all succeeded; a missing LVD / unresolvable partition is structural.
+    let Some(fsd) = fsd_lbn else {
+        return Ok(None);
+    };
     let map_count = maps.len() as u32;
 
     // Resolve the file set's partition via the referenced partition map.
@@ -323,22 +362,31 @@ fn read_vds<R: Read + Seek>(reader: &mut R, vds_loc: u32, vds_len: u32) -> Optio
     let partition_start = referenced
         .and_then(|m| m.partition_number)
         .and_then(|pn| pd_start.get(&pn).copied())
-        .or_else(|| pd_start.values().min().copied())?;
+        .or_else(|| pd_start.values().min().copied());
+    let Some(partition_start) = partition_start else {
+        return Ok(None);
+    };
 
-    Some(VdsInfo {
+    Ok(Some(VdsInfo {
         partition_start,
         fsd_lba: partition_start + fsd,
         partition_kind: kind,
         map_count,
-    })
+    }))
 }
 
 /// Parse FSD at `fsd_lba` to find the root directory FE logical block number.
-fn read_fsd<R: Read + Seek>(reader: &mut R, fsd_lba: u32, partition_start: u32) -> Option<u32> {
+/// `Err` on a read I/O failure, `Ok(None)` when the FSD read succeeds but its
+/// tag is not an FSD, `Ok(Some(root_fe_lba))` when the FSD is valid.
+fn read_fsd_checked<R: Read + Seek>(
+    reader: &mut R,
+    fsd_lba: u32,
+    partition_start: u32,
+) -> Result<Option<u32>, io::Error> {
     let mut sector = [0u8; 2048];
-    seek_read(reader, fsd_lba as u64 * 2048, &mut sector)?;
+    seek_read_checked(reader, fsd_lba as u64 * 2048, &mut sector)?;
     if u16::from_le_bytes([sector[0], sector[1]]) != TAG_FSD {
-        return None;
+        return Ok(None);
     }
     // FSD field sizes (ECMA-167 Table 20):
     //   Tag(16) + RecordingDate(12) + Interchange/Charset fields(28) +
@@ -347,7 +395,7 @@ fn read_fsd<R: Read + Seek>(reader: &mut R, fsd_lba: u32, partition_start: u32) 
     // Root Directory ICB (long_ad) starts at offset 400:
     //   extent_length [400..404], logical_block_num [404..408]
     let lbn = u32::from_le_bytes(sector[404..408].try_into().unwrap());
-    Some(partition_start + lbn)
+    Ok(Some(partition_start + lbn))
 }
 
 /// Detect whether FIDs in this directory data use a standard 16-byte ECMA-167 tag
@@ -565,9 +613,19 @@ fn decode_osta_cs0(bytes: &[u8]) -> String {
 
 /// Seek to `byte_pos` and read exactly `buf.len()` bytes; returns `None` on any error.
 fn seek_read<R: Read + Seek>(reader: &mut R, byte_pos: u64, buf: &mut [u8]) -> Option<()> {
-    reader.seek(SeekFrom::Start(byte_pos)).ok()?;
-    reader.read_exact(buf).ok()?;
-    Some(())
+    seek_read_checked(reader, byte_pos, buf).ok()
+}
+
+/// Seek to `byte_pos` and read exactly `buf.len()` bytes, propagating the real
+/// [`io::Error`] (a truncated image yields [`io::ErrorKind::UnexpectedEof`]).
+fn seek_read_checked<R: Read + Seek>(
+    reader: &mut R,
+    byte_pos: u64,
+    buf: &mut [u8],
+) -> Result<(), io::Error> {
+    reader.seek(SeekFrom::Start(byte_pos))?;
+    reader.read_exact(buf)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -624,7 +682,7 @@ mod checked_bootstrap_tests {
 
     impl Read for FaultyReader {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "device read fault"))
+            Err(io::Error::other("device read fault"))
         }
     }
     impl Seek for FaultyReader {
