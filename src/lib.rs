@@ -609,3 +609,67 @@ mod real_media_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod checked_bootstrap_tests {
+    //! `parse_udf_state_checked` must distinguish a real seek/read I/O failure
+    //! (a bootstrap read failure — truncated/unreadable image) from a structural
+    //! negative (reads succeeded but the anchor is not a valid AVDP → not UDF).
+    use super::parse_udf_state_checked;
+    use std::io::{self, Cursor, Read, Seek, SeekFrom};
+
+    /// A `Read + Seek` whose seeks always succeed but whose reads always fail
+    /// with a non-EOF I/O error — models an unreadable image / device fault.
+    struct FaultyReader;
+
+    impl Read for FaultyReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::Other, "device read fault"))
+        }
+    }
+    impl Seek for FaultyReader {
+        fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn io_error_at_anchor_surfaces_as_err() {
+        let mut r = FaultyReader;
+        let res = parse_udf_state_checked(&mut r);
+        assert!(
+            res.is_err(),
+            "a device read fault reading the anchor must surface as Err, not Ok(None)"
+        );
+    }
+
+    #[test]
+    fn truncated_before_anchor_surfaces_as_err() {
+        // A buffer too short to reach LBA 256 (256 * 2048 = 524288 bytes) — the
+        // read_exact at the anchor hits UnexpectedEof, which is a truncated-image
+        // bootstrap failure and must surface, not be swallowed into Ok(None).
+        let buf = vec![0u8; 4096];
+        let mut r = Cursor::new(buf);
+        let res = parse_udf_state_checked(&mut r);
+        assert!(
+            res.is_err(),
+            "truncation before the AVDP anchor must surface as Err (UnexpectedEof)"
+        );
+        let err = res.err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn full_size_but_wrong_anchor_is_ok_none() {
+        // A buffer large enough to reach and read LBA 256, but whose sector 256 is
+        // all zeros (tag identifier 0, not TAG_AVDP=2) — reads succeed, the
+        // structure is simply not UDF. This is the legitimate "not UDF" case.
+        let buf = vec![0u8; 257 * 2048];
+        let mut r = Cursor::new(buf);
+        let res = parse_udf_state_checked(&mut r);
+        assert!(
+            matches!(res, Ok(None)),
+            "a readable image with a non-AVDP anchor must be Ok(None), got {res:?}"
+        );
+    }
+}
