@@ -42,7 +42,7 @@ if udf_forensic::detect_udf(&mut f) {
 
 ## Validation
 
-Partition-map classification is checked against **real `mkudffs`-authored images** (VAT and Sparable); those tests skip when the 32 MB fixtures are absent.
+Production code is `#![forbid(unsafe_code)]` with bounds-checked reads, and the bootstrap path distinguishes a genuine read failure (`Err`) from a structural "not UDF" negative (`Ok(None)`). Partition-map classification has tests that assert `mkudffs`-built VAT and Sparable images classify correctly — those fixtures are not yet committed, so the tests skip, and no independent decoding oracle (`udfinfo` / `isoinfo` / `mount`) is wired in yet. The full evidence tiers, current gaps, and recommended oracles are documented in [Validation](validation.md).
 
 ## Features
 
