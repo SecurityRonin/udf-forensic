@@ -98,6 +98,29 @@ fn corrupt_avdp_checksum_detected() {
     );
 }
 
+/// Setting a File Entry's modification-time year past the volume's File Set
+/// Descriptor recording time must surface `UDF-TIME-AFTER-VOLUME`. The root File
+/// Entry of `udf_plain` is an Extended File Entry at LBA 263 (512-byte blocks),
+/// whose modification time lives at byte offset 92 of the descriptor; byte 94 is
+/// the high byte of its little-endian `i16` year. Bumping it to 2099 makes the
+/// file post-date the 2026 volume recording time.
+#[test]
+fn file_after_volume_detected() {
+    let mut img = PLAIN.to_vec();
+    let fe = 263 * 512;
+    // ModificationTime year (i16 LE) at FE offset 92+2 = 94. 2099 = 0x0833 →
+    // low byte 0x33 at 94, high byte 0x08 at 95.
+    img[fe + 94] = 0x33;
+    img[fe + 95] = 0x08;
+    let a = anomalies(&img);
+    assert!(
+        a.iter()
+            .any(|x| matches!(x.kind, UdfAnomalyKind::FileAfterVolume { .. })
+                && x.code == "UDF-TIME-AFTER-VOLUME"),
+        "an FE modification time past the volume time must yield UDF-TIME-AFTER-VOLUME, got: {a:?}"
+    );
+}
+
 // ── Observation / derivation contract ────────────────────────────────────────
 
 #[test]

@@ -18,6 +18,12 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
+pub mod findings;
+
+/// The canonical 5-level severity scale, re-exported at the crate root for
+/// convenience (the analyzer grades every finding on it).
+pub use forensicnomicon::report::Severity;
+
 // ── ECMA-167 / UDF tag identifiers ───────────────────────────────────────────
 
 const TAG_AVDP: u16 = 2;
@@ -103,6 +109,16 @@ pub struct UdfState {
     /// detected from the Anchor Volume Descriptor Pointer location rather than
     /// assumed — optical UDF is 2048-byte, but hard-disk media is 512-byte.
     pub block_size: u32,
+    /// Physical LBA of the File Set Descriptor (`partition_start` + its logical
+    /// block). The findings analyzer reads its recording time and validates its
+    /// descriptor tag.
+    pub fsd_lba: u32,
+    /// Logical sector where the Volume Descriptor Sequence begins (from the
+    /// AVDP). The findings analyzer re-walks the VDS to validate each
+    /// descriptor's tag.
+    pub vds_loc: u32,
+    /// Length of the Volume Descriptor Sequence in whole logical blocks.
+    pub vds_len_sectors: u32,
 }
 
 // ── UDF detection (existing public API) ──────────────────────────────────────
@@ -178,6 +194,9 @@ pub fn parse_udf_state_checked<R: Read + Seek>(
         partition_kind: vds.partition_kind,
         partition_map_count: vds.map_count,
         block_size,
+        fsd_lba: vds.fsd_lba,
+        vds_loc,
+        vds_len_sectors: (vds_len as usize).div_ceil(block_size as usize) as u32,
     }))
 }
 
@@ -705,6 +724,219 @@ fn seek_read_checked<R: Read + Seek>(
     Ok(())
 }
 
+// ── Forensic-findings support (used by `findings`) ───────────────────────────
+
+/// The ECMA-167 descriptor-tag checksum (3/7.2): the mod-256 sum of the 16 tag
+/// bytes excluding byte 4 (the checksum field itself).
+pub(crate) fn tag_checksum(tag: &[u8]) -> u8 {
+    let mut sum: u32 = 0;
+    for (i, &b) in tag.iter().take(16).enumerate() {
+        if i == 4 {
+            continue;
+        }
+        sum = sum.wrapping_add(u32::from(b));
+    }
+    (sum & 0xFF) as u8
+}
+
+/// The ECMA-167 descriptor CRC (3/7.2): CRC-CCITT with polynomial `0x1021`,
+/// initial value `0x0000`, no input/output reflection and no final XOR,
+/// computed over the descriptor body (the bytes after the 16-byte tag).
+pub(crate) fn ecma167_crc(body: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &b in body {
+        crc ^= u16::from(b) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+/// Human-readable label for a descriptor tag identifier, or `None` for an
+/// identifier this crate does not recognise (so the caller does not validate a
+/// non-descriptor sector).
+pub(crate) fn descriptor_label(tag_ident: u16) -> Option<&'static str> {
+    Some(match tag_ident {
+        TAG_AVDP => "AVDP",
+        TAG_PD => "PartitionDescriptor",
+        TAG_LVD => "LogicalVolumeDescriptor",
+        TAG_TERM => "TerminatingDescriptor",
+        TAG_FSD => "FileSetDescriptor",
+        TAG_FID => "FileIdentifierDescriptor",
+        TAG_FE | TAG_FE_ALT => "FileEntry",
+        TAG_EFE => "ExtendedFileEntry",
+        1 => "PrimaryVolumeDescriptor",
+        3 => "VolumeDescriptorPointer",
+        4 => "ImplementationUseVolumeDescriptor",
+        7 => "UnallocatedSpaceDescriptor",
+        9 => "LogicalVolumeIntegrityDescriptor",
+        258 => "AllocationExtentDescriptor",
+        259 => "IndirectEntry",
+        262 => "SpaceBitmapDescriptor",
+        263 => "PartitionIntegrityEntry",
+        264 => "ExtendedAttributeHeaderDescriptor",
+        265 => "UnallocatedSpaceEntry",
+        _ => return None,
+    })
+}
+
+/// Decode an ECMA-167 `timestamp` (1/7.3, 12 bytes) to `YYYY-MM-DD HH:MM:SS`,
+/// or `None` when the year is implausible (0 / out of the 1970..=2200 range),
+/// which marks an unset or non-timestamp field rather than a real time.
+pub(crate) fn decode_timestamp(b: &[u8]) -> Option<String> {
+    if b.len() < 12 {
+        return None;
+    }
+    let year = i16::from_le_bytes([b[2], b[3]]);
+    if !(1970..=2200).contains(&year) {
+        return None;
+    }
+    let (month, day, hour, minute, second) = (b[4], b[5], b[6], b[7], b[8]);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+    ))
+}
+
+/// Read the File Set Descriptor's recording time (4/14.1, offset 16) from the
+/// FSD at `fsd_lba`. `Ok(None)` when the sector is not an FSD or the time is
+/// unset.
+pub(crate) fn fsd_recording_time<R: Read + Seek>(
+    reader: &mut R,
+    block_size: u32,
+    fsd_lba: u32,
+) -> Result<Option<String>, io::Error> {
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let sector = &mut buf[..block_size as usize];
+    seek_read_checked(reader, u64::from(fsd_lba) * u64::from(block_size), sector)?;
+    if u16::from_le_bytes([sector[0], sector[1]]) != TAG_FSD {
+        return Ok(None);
+    }
+    Ok(decode_timestamp(&sector[16..28]))
+}
+
+/// The Modification Time of a File Entry sector (`is_efe` selects the Extended
+/// File Entry layout, whose extra Object Size + Creation Time fields shift the
+/// timestamps): base FE modification time is at offset 84, EFE at offset 92.
+pub(crate) fn fe_modification_time(sector: &[u8], is_efe: bool) -> Option<String> {
+    let off = if is_efe { 92 } else { 84 };
+    decode_timestamp(sector.get(off..off + 12)?)
+}
+
+/// Count the non-zero bytes in a File Entry's final-block slack — the unused
+/// tail of the last logical block after `InformationLength`, since a file
+/// occupies whole logical blocks.
+///
+/// Returns `(nonzero_bytes, slack_bytes)`, or `None` when the file has no
+/// trailing slack (size is a whole-block multiple), is zero-length, has its data
+/// stored inline in the File Entry (no allocated block to hold slack), or its
+/// final block cannot be located/read.
+pub(crate) fn fe_slack_nonzero<R: Read + Seek>(
+    reader: &mut R,
+    block_size: u32,
+    partition_start: u32,
+    fe_lba: u32,
+) -> Option<(u32, u32)> {
+    let info_len = read_fe_info_len(reader, block_size, fe_lba)?;
+    let bs = u64::from(block_size);
+    let slack = (bs - info_len % bs) % bs;
+    if info_len == 0 || slack == 0 {
+        return None;
+    }
+    // Physical byte position of the file's last allocated block, walked through
+    // the FE's allocation descriptors so the slack inspected is the true final
+    // block (not a guess). Inline-stored files have no allocated block and so no
+    // slack to inspect.
+    let last_block_pos = fe_last_block_pos(reader, block_size, partition_start, fe_lba)?;
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let block = &mut buf[..block_size as usize];
+    seek_read_checked(reader, last_block_pos, block).ok()?;
+
+    let slack_start = (info_len % bs) as usize;
+    let nonzero = block[slack_start..].iter().filter(|&&b| b != 0).count() as u32;
+    Some((nonzero, slack as u32))
+}
+
+/// Physical byte position of the *last* logical block holding a File Entry's
+/// data, resolved by walking its allocation descriptors. `None` for inline
+/// (in-ICB) data, an unreadable FE, or an FE with no recorded extent.
+fn fe_last_block_pos<R: Read + Seek>(
+    reader: &mut R,
+    block_size: u32,
+    partition_start: u32,
+    fe_lba: u32,
+) -> Option<u64> {
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let sector = &mut buf[..block_size as usize];
+    seek_read_checked(reader, u64::from(fe_lba) * u64::from(block_size), sector).ok()?;
+
+    let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
+    let is_efe = tag_ident == TAG_EFE;
+    if tag_ident != TAG_FE && tag_ident != TAG_FE_ALT && !is_efe {
+        return None;
+    }
+
+    let icb_flags = u16::from_le_bytes([sector[34], sector[35]]);
+    let alloc_type = icb_flags & 0x0007;
+    let (ea_off, ad_off, header) = if is_efe {
+        (176usize, 180usize, 184usize)
+    } else {
+        (168usize, 172usize, 176usize)
+    };
+    if ad_off + 4 > sector.len() {
+        return None; // cov:unreachable: header offsets fit a >=512-byte block
+    }
+    let ea_len = u32::from_le_bytes(sector[ea_off..ea_off + 4].try_into().ok()?) as usize;
+    let ad_len = u32::from_le_bytes(sector[ad_off..ad_off + 4].try_into().ok()?) as usize;
+    let ad_start = header + ea_len;
+    let ad_end = ad_start.checked_add(ad_len)?;
+    if ad_end > sector.len() {
+        return None;
+    }
+    let ad_area = &sector[ad_start..ad_end];
+
+    // Both short_ad (8 bytes) and long_ad (16 bytes) record the extent length at
+    // bytes 0..4 and the logical block number at bytes 4..8; only the stride to
+    // the next descriptor differs. Inline (in-ICB) data has no allocated block.
+    let stride = match alloc_type {
+        ALLOC_SHORT => 8,
+        ALLOC_LONG => 16,
+        _ => return None,
+    };
+    let mut last: Option<u64> = None;
+    let mut pos = 0;
+    while pos + stride <= ad_area.len() {
+        let len_raw = read_le_u32(ad_area, pos);
+        let ext_type = len_raw >> 30;
+        let ext_len = (len_raw & 0x3FFF_FFFF) as usize;
+        if ext_type == (EXTENT_RECORDED >> 30) && ext_len > 0 {
+            let lbn = read_le_u32(ad_area, pos + 4);
+            let blocks_in_ext = ext_len.div_ceil(block_size as usize) as u64;
+            let last_lbn = u64::from(partition_start) + u64::from(lbn) + (blocks_in_ext - 1);
+            last = Some(last_lbn * u64::from(block_size));
+        }
+        pos += stride;
+    }
+    last
+}
+
+/// Read a little-endian `u32` at `off`, returning 0 if out of range (the caller
+/// has already bounds-checked the slice length, so the fallback is defensive).
+fn read_le_u32(data: &[u8], off: usize) -> u32 {
+    let mut b = [0u8; 4];
+    if let Some(s) = data.get(off..off + 4) {
+        b.copy_from_slice(s);
+    }
+    u32::from_le_bytes(b)
+}
+
 #[cfg(test)]
 mod real_media_tests {
     //! Validate partition-map classification against real mkudffs-authored
@@ -889,5 +1121,161 @@ mod checked_bootstrap_tests {
             matches!(res, Ok(None)),
             "a readable image with a non-AVDP anchor must be Ok(None), got {res:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod findings_support_tests {
+    //! Unit coverage for the findings-support primitives. The CRC/checksum
+    //! implementations are additionally validated against the real `mkudffs`
+    //! corpus by the `findings` integration tests (a clean image's descriptors
+    //! must all verify — a true negative); these tests cover the pure helpers
+    //! and the allocated-extent slack path the inline-data corpus cannot reach.
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn crc_ccitt_matches_known_vectors() {
+        // CRC-CCITT (poly 0x1021, init 0x0000): "123456789" → 0x31C3 is the
+        // standard published vector for this parameterisation.
+        assert_eq!(ecma167_crc(b"123456789"), 0x31C3);
+        assert_eq!(ecma167_crc(&[]), 0x0000);
+    }
+
+    #[test]
+    fn tag_checksum_skips_byte_4() {
+        let mut tag = [0u8; 16];
+        tag[0] = 2; // contributes
+        tag[4] = 0xFF; // the checksum byte itself — must be excluded
+        tag[6] = 3; // contributes
+        assert_eq!(tag_checksum(&tag), 5);
+    }
+
+    #[test]
+    fn descriptor_label_known_and_unknown() {
+        assert_eq!(descriptor_label(TAG_FSD), Some("FileSetDescriptor"));
+        assert_eq!(descriptor_label(TAG_EFE), Some("ExtendedFileEntry"));
+        assert_eq!(
+            descriptor_label(9),
+            Some("LogicalVolumeIntegrityDescriptor")
+        );
+        assert_eq!(descriptor_label(0xFFFF), None);
+    }
+
+    #[test]
+    fn timestamp_decodes_and_rejects_implausible() {
+        let mut t = [0u8; 12];
+        t[2..4].copy_from_slice(&2026i16.to_le_bytes());
+        t[4] = 6; // month
+        t[5] = 21; // day
+        t[6] = 8; // hour
+        t[7] = 46; // minute
+        t[8] = 57; // second
+        assert_eq!(decode_timestamp(&t).as_deref(), Some("2026-06-21 08:46:57"));
+
+        // Year out of range → None (unset/garbage field).
+        let mut bad = t;
+        bad[2..4].copy_from_slice(&0i16.to_le_bytes());
+        assert_eq!(decode_timestamp(&bad), None);
+
+        // Month out of range → None.
+        let mut badmon = t;
+        badmon[4] = 0;
+        assert_eq!(decode_timestamp(&badmon), None);
+
+        // Short buffer → None.
+        assert_eq!(decode_timestamp(&[0u8; 4]), None);
+    }
+
+    #[test]
+    fn fe_modification_time_offset_differs_for_efe() {
+        // Base FE: mtime at offset 84; EFE: mtime at offset 92.
+        let mut fe = vec![0u8; 512];
+        let stamp = |buf: &mut [u8], off: usize, year: i16| {
+            buf[off + 2..off + 4].copy_from_slice(&year.to_le_bytes());
+            buf[off + 4] = 1; // month
+            buf[off + 5] = 1; // day
+        };
+        stamp(&mut fe, 84, 2030);
+        assert_eq!(
+            fe_modification_time(&fe, false).as_deref(),
+            Some("2030-01-01 00:00:00")
+        );
+        let mut efe = vec![0u8; 512];
+        stamp(&mut efe, 92, 2031);
+        assert_eq!(
+            fe_modification_time(&efe, true).as_deref(),
+            Some("2031-01-01 00:00:00")
+        );
+    }
+
+    /// Build a minimal 512-byte-block image with a base File Entry that points,
+    /// via a short allocation descriptor, to a single data block whose tail
+    /// (past `InformationLength`) holds non-zero slack — the allocated-extent
+    /// path the inline-data `mkudffs` corpus cannot exercise.
+    fn image_with_slack(info_len: u64, slack_fill: &[u8]) -> (Vec<u8>, u32, u32) {
+        let bs = 512usize;
+        let part_start = 0u32;
+        let fe_lba = 4u32;
+        let data_lbn = 5u32; // physical = part_start + 5
+        let mut img = vec![0u8; bs * 8];
+
+        let fe = fe_lba as usize * bs;
+        // Tag identifier = File Entry (260).
+        img[fe..fe + 2].copy_from_slice(&TAG_FE.to_le_bytes());
+        // ICB flags: allocation type 0 (short_ad).
+        img[fe + 34..fe + 36].copy_from_slice(&0u16.to_le_bytes());
+        // InformationLength.
+        img[fe + 56..fe + 64].copy_from_slice(&info_len.to_le_bytes());
+        // Base-FE header offsets: L_EA @168, L_AD @172, AD area @176.
+        img[fe + 168..fe + 172].copy_from_slice(&0u32.to_le_bytes()); // L_EA = 0
+        img[fe + 172..fe + 176].copy_from_slice(&8u32.to_le_bytes()); // L_AD = 8 (one short_ad)
+                                                                      // short_ad: extent_length (recorded, type 0) = info_len, position = data_lbn.
+        let ad = fe + 176;
+        img[ad..ad + 4].copy_from_slice(&(info_len as u32).to_le_bytes());
+        img[ad + 4..ad + 8].copy_from_slice(&data_lbn.to_le_bytes());
+
+        // Data block: fill the slack region (past info_len within the block).
+        let data = (part_start + data_lbn) as usize * bs;
+        let slack_start = data + (info_len as usize % bs);
+        for (i, &b) in slack_fill.iter().enumerate() {
+            img[slack_start + i] = b;
+        }
+        (img, part_start, fe_lba)
+    }
+
+    #[test]
+    fn slack_counts_nonzero_tail_bytes() {
+        // info_len 100 in a 512-byte block → 412 slack bytes; place 3 non-zero.
+        let (img, ps, fe) = image_with_slack(100, &[0xAA, 0x00, 0xBB, 0xCC]);
+        let mut r = Cursor::new(img);
+        let (nonzero, slack) = fe_slack_nonzero(&mut r, 512, ps, fe).expect("slack present");
+        assert_eq!(slack, 412);
+        assert_eq!(nonzero, 3);
+    }
+
+    #[test]
+    fn slack_none_when_block_aligned() {
+        // info_len exactly one block → no slack.
+        let (img, ps, fe) = image_with_slack(512, &[0xFF]);
+        let mut r = Cursor::new(img);
+        assert_eq!(fe_slack_nonzero(&mut r, 512, ps, fe), None);
+    }
+
+    #[test]
+    fn slack_none_when_zero_length() {
+        let (img, ps, fe) = image_with_slack(0, &[]);
+        let mut r = Cursor::new(img);
+        assert_eq!(fe_slack_nonzero(&mut r, 512, ps, fe), None);
+    }
+
+    #[test]
+    fn slack_none_for_inline_data() {
+        // Allocation type 3 (inline) has no allocated block to inspect.
+        let (mut img, ps, fe) = image_with_slack(100, &[0xAA]);
+        let fe_off = fe as usize * 512;
+        img[fe_off + 34..fe_off + 36].copy_from_slice(&3u16.to_le_bytes());
+        let mut r = Cursor::new(img);
+        assert_eq!(fe_slack_nonzero(&mut r, 512, ps, fe), None);
     }
 }

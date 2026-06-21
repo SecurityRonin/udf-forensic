@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "forensicnomicon"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfe546feee17338650992e6ee37251e8221bb707a46bf38ce210fef3c963fb90"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -65,6 +74,7 @@ dependencies = [
 name = "udf-forensic"
 version = "0.1.0"
 dependencies = [
+ "forensicnomicon",
  "serde",
 ]
 
