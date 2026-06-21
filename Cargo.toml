@@ -11,6 +11,10 @@ documentation = "https://docs.rs/udf-forensic"
 readme = "README.md"
 keywords = ["forensics", "udf", "ecma-167", "filesystem", "dfir"]
 categories = ["parser-implementations", "filesystem"]
+# Real mkudffs-authored UDF images used only by the in-crate real_media_tests;
+# they are committed for reproducible local validation but must not bloat the
+# published crate (downstream consumers never run these tests).
+exclude = ["tests/data/*.img"]
 
 [features]
 serde = ["dep:serde"]

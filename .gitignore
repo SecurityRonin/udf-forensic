@@ -1,2 +1,7 @@
 /target
 *.img
+# Real mkudffs-authored UDF fixtures are committed (mostly-zero, ~10 KB packed
+# each) so the real_media_tests run reproducibly; see tests/data/README.md.
+!tests/data/udf_vat.img
+!tests/data/udf_spar.img
+!tests/data/udf_plain.img

@@ -3,76 +3,136 @@
 Per-file provenance for this crate's test data. The fleet-wide machine index is
 [`issen/docs/corpus-catalog.md`](https://github.com/SecurityRonin/issen) — this README is
 the co-located human detail; cross-reference, never duplicate. The tier rationale and the
-list of recommended independent-oracle gaps live in [`docs/validation.md`](../../docs/validation.md);
-this file documents only the per-fixture provenance and the **current absence** of the corpus.
+list of independent-oracle validations live in [`docs/validation.md`](../../docs/validation.md);
+this file documents only the per-fixture provenance.
 
-## Status: `tests/data/` is currently EMPTY
+## Status: real `mkudffs` corpus committed, reconciled against the `udfinfo` oracle
 
-**No fixtures are committed, and no generator ships in the repo yet.** The two real-media
-images named below (`udf_vat.img`, `udf_spar.img`) and the generator script
-(`corpus/gen_udf_type2.sh`) referenced by the test module comment in `src/lib.rs`
-(`mod real_media_tests`) are **absent**. The two tests that consume them
-(`vat_image_classified_virtual`, `sparable_image_classified_sparable`) are written to
-**skip cleanly when the fixture is missing** — they `eprintln!("skip: …")` and return — so
-the committed suite is green without the corpus. This README records what *should* be here
-and how to reproduce it, so the gap is documented rather than silent.
+Three real UDF images, authored by **`mkudffs` (udftools 2.3)** and committed here, back the
+`real_media_tests` in `src/lib.rs`. Each image's ground truth is cross-checked against the
+independent **`udfinfo`** decoder (a separate codebase from this crate) — the oracle output is
+captured verbatim below. The images are mostly-zero (≈10 KB each when packed by git), so they are
+committed despite the global `*.img` ignore (a `.gitignore` negation un-ignores these three).
 
-The path to compliance is to commit `corpus/gen_udf_type2.sh` (the exact `mkudffs` invocations
-below) plus the generated images — or, if the images are too large to commit, gitignore them
-and pin the exact `mkudffs` flags **and the MD5 of each generated file** in this README so the
-corpus is reproducible. See the *Independent test corpora* section of
-[`docs/validation.md`](../../docs/validation.md) for the gap write-up and the recommended
-`udfinfo`/`isoinfo`/`mount -t udf` oracles that would lift these from Tier 2 to Tier 1.
+The corpus was minted on macOS via a rootless Linux container (`podman run ubuntu:24.04`) because
+`mkudffs`/`udfinfo` are Linux-only; the verbatim commands are below and reproduce byte-identically
+on any udftools 2.3 host.
 
-#### udf_vat.img — NOT COMMITTED (generator absent)
+- **Tool:** `udftools 2.3` (`2.3-1build2`, arm64), package `udftools`.
+- **Mint command (per image):** `apt-get install -y udftools` then the `dd` + `mkudffs` lines below.
+- **Redistribution:** `mkudffs` output is freely redistributable (the images contain only tool-authored
+  filesystem structure and zero user data).
 
-- **Intended source:** a UDF 1.50 image authored by `mkudffs` (udftools) for CD-R media,
-  whose partition map is a **Virtual Allocation Table (VAT)** partition.
-  - Intended generator command:
-    ```sh
-    dd if=/dev/zero of=tests/data/udf_vat.img bs=1M count=32
-    mkudffs --media-type=cdr --udfrev=0x0150 tests/data/udf_vat.img
-    ```
-- **Consumed by:** `src/lib.rs` `mod real_media_tests` → `vat_image_classified_virtual`
-  (asserts `UdfPartitionKind::Virtual`).
-- **Ground-truth basis:** the `mkudffs` construction profile for `cdr`/UDF 1.50 (Tier 2 — the
-  tool author's documented output for that media type; no independent decoder cross-checks the
-  same bytes yet).
-- **Status:** **NOT COMMITTED.** The fixture is absent and the generator
-  `corpus/gen_udf_type2.sh` does not exist in the repo. Must be regenerated with the command
-  above before `vat_image_classified_virtual` can run.
-- **Redistribution:** `mkudffs` output is freely redistributable.
-- **MD5:** *not available — the fixture has never been committed; do not record a hash until a
-  real generated image exists.*
+#### udf_vat.img — UDF 1.50, cdr media, Virtual (VAT) partition map
 
-#### udf_spar.img — NOT COMMITTED (generator absent)
+- **Source:** a UDF 1.50 image authored by `mkudffs` for CD-R media. The logical volume carries a
+  physical partition map plus a Type-2 `*UDF Virtual Partition` (VAT) map.
+- **Generator command (verbatim):**
+  ```sh
+  dd if=/dev/zero of=udf_vat.img bs=1M count=8
+  mkudffs --media-type=cdr --udfrev=0x0150 udf_vat.img
+  ```
+- **Size / MD5:** 8 388 608 bytes - `1258d2b17f095af79bdb1141059eac84`
+- **Consumed by:** `src/lib.rs` `mod real_media_tests` -> `vat_image_classified_virtual`
+  (asserts `UdfPartitionKind::Virtual`) and `vat_image_matches_udfinfo_oracle`
+  (asserts `partition_start == 257`, `partition_map_count == 2`).
+- **`udfinfo` oracle output (independent ground truth):**
+  ```
+  udfinfo: Error: Virtual Allocation Table not found, maybe wrong --vatblock?
+  udfinfo: Warning: Logical Volume is in inconsistent state
+  filename=udf_vat.img
+  label=LinuxUDF
+  blocksize=2048
+  blocks=4096
+  numfiles=0
+  numdirs=1
+  udfrev=1.50
+  udfwriterev=1.50
+  integrity=opened
+  accesstype=writeonce
+  start=16, blocks=3, type=VRS
+  start=96, blocks=16, type=MVDS
+  start=128, blocks=1, type=LVID
+  start=240, blocks=16, type=RVDS
+  start=256, blocks=1, type=ANCHOR
+  start=257, blocks=3839, type=PSPACE
+  ```
+  The VAT-not-found / inconsistent-state notes are expected for freshly-built write-once media (the
+  LVID is left "opened" until the disc is closed); the partition space (`PSPACE`) starts at block 257,
+  which this crate independently resolves as `partition_start = 257`.
 
-- **Intended source:** a UDF 2.01 image authored by `mkudffs` (udftools) for DVD-RW media,
-  whose partition map is a **Sparable** partition.
-  - Intended generator command:
-    ```sh
-    dd if=/dev/zero of=tests/data/udf_spar.img bs=1M count=32
-    mkudffs --media-type=dvdrw --udfrev=0x0201 tests/data/udf_spar.img
-    ```
-- **Consumed by:** `src/lib.rs` `mod real_media_tests` → `sparable_image_classified_sparable`
-  (asserts `UdfPartitionKind::Sparable`).
-- **Ground-truth basis:** the `mkudffs` construction profile for `dvdrw`/UDF 2.01 (Tier 2; no
-  independent decoder cross-checks the same bytes yet).
-- **Status:** **NOT COMMITTED.** The fixture is absent and the generator
-  `corpus/gen_udf_type2.sh` does not exist in the repo. Must be regenerated with the command
-  above before `sparable_image_classified_sparable` can run.
-- **Redistribution:** `mkudffs` output is freely redistributable.
-- **MD5:** *not available — the fixture has never been committed; do not record a hash until a
-  real generated image exists.*
+#### udf_spar.img — UDF 2.01, dvdrw media, Sparable partition map
 
-## When you commit the corpus
+- **Source:** a UDF 2.01 image authored by `mkudffs` for DVD-RW media. The logical volume carries a
+  single Type-2 `*UDF Sparable Partition` map; the image contains a sparing-space (`SSPACE`) region.
+- **Generator command (verbatim):**
+  ```sh
+  dd if=/dev/zero of=udf_spar.img bs=1M count=8
+  mkudffs --media-type=dvdrw --udfrev=0x0201 udf_spar.img
+  ```
+- **Size / MD5:** 8 388 608 bytes - `70285bf8979a026380517bfc48ae6ee6`
+- **Consumed by:** `src/lib.rs` `mod real_media_tests` -> `sparable_image_classified_sparable`
+  (asserts `UdfPartitionKind::Sparable`) and `sparable_image_matches_udfinfo_oracle`
+  (asserts `partition_start == 1296`, `partition_map_count == 1`).
+- **`udfinfo` oracle output (independent ground truth):**
+  ```
+  filename=udf_spar.img
+  label=LinuxUDF
+  blocksize=2048
+  blocks=4096
+  numfiles=0
+  numdirs=1
+  udfrev=2.01
+  udfwriterev=2.01
+  integrity=closed
+  accesstype=overwritable
+  start=16, blocks=3, type=VRS
+  start=96, blocks=16, type=MVDS
+  start=112, blocks=1, type=STABLE
+  start=128, blocks=1, type=LVID
+  start=256, blocks=1, type=ANCHOR
+  start=272, blocks=1024, type=SSPACE
+  start=1296, blocks=2528, type=PSPACE
+  start=3839, blocks=1, type=ANCHOR
+  start=3936, blocks=16, type=RVDS
+  start=4080, blocks=1, type=STABLE
+  start=4095, blocks=1, type=ANCHOR
+  ```
+  The 1024-block `SSPACE` (sparing space) sits before the partition space, so `PSPACE` starts at
+  block 1296 — which this crate independently resolves as `partition_start = 1296`.
 
-1. Place `corpus/gen_udf_type2.sh` in the repo containing the `dd` + `mkudffs` lines above so
-   the images are reproducible from one script.
-2. Generate `tests/data/udf_vat.img` and `tests/data/udf_spar.img`.
-3. Hash each generated file (`md5 tests/data/udf_vat.img`) and replace the *MD5 not available*
-   lines above with the real values, plus a byte-size column.
-4. Add the matching entries to `issen/docs/corpus-catalog.md` (classify `SYNTHETIC`, record the
-   verbatim `mkudffs` command).
-5. Add a `udfinfo` (or `isoinfo`/`mount -t udf`) differential as the independent oracle to lift
-   the partition-map assertion from Tier 2 to Tier 1, per `docs/validation.md`.
+#### udf_plain.img — UDF 2.01, hd media, 512-byte blocks (supplementary)
+
+- **Source:** a UDF 2.01 image authored by `mkudffs` for hard-disk media. Plain physical partition,
+  **512-byte block size**.
+- **Generator command (verbatim):**
+  ```sh
+  dd if=/dev/zero of=udf_plain.img bs=1M count=8
+  mkudffs --media-type=hd --udfrev=0x0201 udf_plain.img
+  ```
+- **Size / MD5:** 8 388 608 bytes - `31d06a9942f8bc4983617631a9ac4e30`
+- **Consumed by:** not asserted in a test today. It is committed as a **documented limitation marker**:
+  this crate currently assumes a 2048-byte logical block (the AVDP is read at byte offset `256 * 2048`),
+  so it returns `parse_udf_state == None` on this 512-byte-block image even though `detect_udf` finds the
+  NSR recognition sequence. `udfinfo` reads it correctly (`blocksize=512`, `udfrev=2.01`,
+  `start=257, blocks=15864, type=PSPACE`). Keeping the fixture documents the gap and seeds a future
+  variable-block-size test.
+
+## Reproducing the corpus on a non-Linux host
+
+`mkudffs`/`udfinfo` are Linux-only. On macOS, mint via a rootless Linux container (no VM SSH needed):
+
+```sh
+mkdir -p ~/udfwork && cd ~/udfwork           # must live under /Users (podman machine mount)
+podman machine start                          # one-time
+podman run --rm -v "$PWD:/work:Z" ubuntu:24.04 bash -c '
+  apt-get update -qq && apt-get install -y -qq udftools && cd /work &&
+  dd if=/dev/zero of=udf_vat.img  bs=1M count=8 && mkudffs --media-type=cdr   --udfrev=0x0150 udf_vat.img  &&
+  dd if=/dev/zero of=udf_spar.img bs=1M count=8 && mkudffs --media-type=dvdrw --udfrev=0x0201 udf_spar.img &&
+  dd if=/dev/zero of=udf_plain.img bs=1M count=8 && mkudffs --media-type=hd   --udfrev=0x0201 udf_plain.img &&
+  udfinfo udf_vat.img; udfinfo udf_spar.img; udfinfo udf_plain.img'
+```
+
+Then verify the MD5s match the values above before relying on the images. The matching entries in
+[`issen/docs/corpus-catalog.md`](https://github.com/SecurityRonin/issen) classify these `SYNTHETIC`
+(self-minted from a real third-party tool) and record the same verbatim commands.

@@ -46,7 +46,7 @@ if udf_forensic::detect_udf(&mut f) {
 
 ## Validation
 
-Production code is `#![forbid(unsafe_code)]` with bounds-checked reads, and the bootstrap path distinguishes a genuine read failure (`Err`) from a structural "not UDF" negative (`Ok(None)`). Partition-map classification has tests that assert `mkudffs`-built VAT and Sparable images classify correctly — those fixtures are not yet committed, so the tests skip, and no independent decoding oracle (`udfinfo` / `isoinfo` / `mount`) is wired in yet. The full evidence tiers, current gaps, and recommended oracles are documented at **[validation](https://securityronin.github.io/udf-forensic/validation/)**.
+Production code is `#![forbid(unsafe_code)]` with bounds-checked reads, and the bootstrap path distinguishes a genuine read failure (`Err`) from a structural "not UDF" negative (`Ok(None)`). Partition-map classification is validated against **real `mkudffs`-authored images** committed to `tests/data/`, cross-checked by the independent **`udfinfo`** (udftools) decoder: the tests assert that VAT (cdr/1.50) and Sparable (dvdrw/2.01) images classify correctly *and* that the resolved partition-space start matches `udfinfo`'s reported `PSPACE` block (Tier 1). Volume-recognition and directory/file-data oracles (`isoinfo` / `mount -t udf`) remain named gaps. The full evidence tiers, oracles, and gaps are documented at **[validation](https://securityronin.github.io/udf-forensic/validation/)**.
 
 ## Features
 
