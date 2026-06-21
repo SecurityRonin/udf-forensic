@@ -121,6 +121,21 @@ fn file_after_volume_detected() {
     );
 }
 
+/// A readable but non-UDF source (all zeros, no AVDP) yields no anomalies —
+/// there is nothing to audit, and a structural negative is `Ok(empty)`, not an
+/// error (the bootstrap *read* succeeded).
+#[test]
+fn non_udf_source_is_empty() {
+    // Large enough to reach LBA 256 at 2048-byte blocks, but all zeros.
+    let buf = vec![0u8; 257 * 2048];
+    let mut r = Cursor::new(buf);
+    let a = analyze(&mut r).expect("a readable non-UDF source is Ok, not Err");
+    assert!(
+        a.is_empty(),
+        "non-UDF source must yield no anomalies, got: {a:?}"
+    );
+}
+
 // ── Observation / derivation contract ────────────────────────────────────────
 
 #[test]

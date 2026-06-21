@@ -446,3 +446,268 @@ fn audit_file_entry<R: Read + Seek>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Drives the anomaly arms the real `mkudffs` corpus cannot reach: the
+    //! SLACK-DATA emission path (the corpus stores all files inline, so it has
+    //! no allocated-block slack) and the pure severity/category/code/note/Display
+    //! surface for every variant. The corpus-backed CRC / checksum /
+    //! time-after-volume paths are validated end-to-end by `tests/findings.rs`.
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use forensicnomicon::report::{Category, Observation, Source};
+    use std::io::Cursor;
+
+    /// Build a 512-byte-block image with a base File Entry (LBA 4) whose single
+    /// short allocation descriptor points to a data block (LBA 5) carrying
+    /// non-zero slack past `info_len`.
+    fn slack_image(info_len: u64, slack: &[u8]) -> Vec<u8> {
+        let bs = 512usize;
+        let mut img = vec![0u8; bs * 8];
+        let fe = 4 * bs;
+        img[fe..fe + 2].copy_from_slice(&crate::TAG_FE.to_le_bytes());
+        img[fe + 34..fe + 36].copy_from_slice(&0u16.to_le_bytes()); // short_ad alloc
+        img[fe + 56..fe + 64].copy_from_slice(&info_len.to_le_bytes());
+        img[fe + 168..fe + 172].copy_from_slice(&0u32.to_le_bytes()); // L_EA
+        img[fe + 172..fe + 176].copy_from_slice(&8u32.to_le_bytes()); // L_AD
+        img[fe + 176..fe + 180].copy_from_slice(&(info_len as u32).to_le_bytes());
+        img[fe + 180..fe + 184].copy_from_slice(&5u32.to_le_bytes()); // data lbn
+        let data = 5 * bs + (info_len as usize % bs);
+        img[data..data + slack.len()].copy_from_slice(slack);
+        img
+    }
+
+    #[test]
+    fn audit_file_entry_emits_slack_finding() {
+        let mut r = Cursor::new(slack_image(100, &[0x01, 0x00, 0x02]));
+        let mut out = Vec::new();
+        audit_file_entry(&mut r, 512, 0, 4, None, &mut out).unwrap();
+        let slack: Vec<_> = out
+            .iter()
+            .filter(|a| matches!(a.kind, UdfAnomalyKind::SlackData { .. }))
+            .collect();
+        assert_eq!(slack.len(), 1);
+        assert_eq!(slack[0].code, "UDF-SLACK-DATA");
+        assert_eq!(slack[0].severity, Severity::Low);
+        assert!(matches!(
+            slack[0].kind,
+            UdfAnomalyKind::SlackData {
+                nonzero_bytes: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn slack_anomaly_surface() {
+        let an = UdfAnomaly::new(UdfAnomalyKind::SlackData {
+            lba: 5,
+            nonzero_bytes: 2,
+            slack_bytes: 412,
+        });
+        assert_eq!(an.code, "UDF-SLACK-DATA");
+        assert_eq!(an.severity, Severity::Low);
+        assert_eq!(an.kind.category(), Category::Residue);
+        assert!(an.note.contains("consistent with"));
+        // Display formats "[severity] code: note".
+        let shown = an.to_string();
+        assert!(
+            shown.starts_with("[LOW] UDF-SLACK-DATA: "),
+            "unexpected Display: {shown}"
+        );
+        // Observation severity is Some(Low); to_finding carries the category.
+        assert_eq!(Observation::severity(&an), Some(Severity::Low));
+        assert_eq!(an.to_finding(Source::default()).category, Category::Residue);
+    }
+
+    #[test]
+    fn file_after_volume_surface() {
+        let an = UdfAnomaly::new(UdfAnomalyKind::FileAfterVolume {
+            lba: 7,
+            file_time: "2099-01-01 00:00:00".into(),
+            volume_time: "2026-06-21 08:46:57".into(),
+        });
+        assert_eq!(an.code, "UDF-TIME-AFTER-VOLUME");
+        assert_eq!(an.severity, Severity::Medium);
+        assert_eq!(an.kind.category(), Category::History);
+        assert!(an.note.contains("consistent with"));
+    }
+
+    // ── End-to-end walk over a hand-built minimal UDF ────────────────────────
+
+    const BS: usize = 512;
+
+    /// Stamp a valid ECMA-167 descriptor tag (identifier, location, and matching
+    /// checksum + CRC over `crc_len` body bytes) into `img` at logical block
+    /// `lba`, so the analyzer's tag validation passes (no spurious tag anomaly).
+    fn stamp_tag(img: &mut [u8], lba: usize, tag_id: u16, crc_len: u16) {
+        let o = lba * BS;
+        img[o..o + 2].copy_from_slice(&tag_id.to_le_bytes());
+        img[o + 2..o + 4].copy_from_slice(&0x0102u16.to_le_bytes()); // descriptor version
+        img[o + 12..o + 16].copy_from_slice(&(lba as u32).to_le_bytes()); // tag location
+        let crc = crate::ecma167_crc(&img[o + 16..o + 16 + crc_len as usize]);
+        img[o + 8..o + 10].copy_from_slice(&crc.to_le_bytes());
+        img[o + 10..o + 12].copy_from_slice(&crc_len.to_le_bytes());
+        img[o + 4] = crate::tag_checksum(&img[o..o + 16]);
+    }
+
+    /// Write one inline File Identifier Descriptor (16-byte tag) into `data` at
+    /// `off`, naming a child File Entry at logical block `child_lbn`, and return
+    /// the advance to the next FID.
+    fn write_fid(data: &mut [u8], off: usize, child_lbn: u32, is_dir: bool, name: &[u8]) -> usize {
+        data[off..off + 2].copy_from_slice(&crate::TAG_FID.to_le_bytes());
+        // body @16: file_version(2) file_chars(1) L_FI(1) ICB long_ad(16) L_IU(2) FI…
+        let body = off + 16;
+        data[body] = 1; // file version (low byte)
+        data[body + 2] = if is_dir { 0x02 } else { 0x00 }; // file characteristics
+        data[body + 3] = name.len() as u8; // L_FI
+                                           // ICB long_ad: extent_length@+4..+8, logical_block_num@+8..+12.
+        data[body + 8..body + 12].copy_from_slice(&child_lbn.to_le_bytes());
+        // L_IU @ body+18..+20 = 0; file identifier follows at body+20.
+        let id = body + 20;
+        data[id..id + name.len()].copy_from_slice(name);
+        let raw = 16 + 2 + 1 + 1 + 16 + 2 + name.len(); // tag..end of FI
+        let advance = (raw + 3) & !3;
+        // CRC length spans the body (everything after the 16-byte tag).
+        data[off + 10..off + 12].copy_from_slice(&((advance - 16) as u16).to_le_bytes());
+        advance
+    }
+
+    /// Stamp a directory File Entry at `lba` whose inline data is `fids`.
+    fn stamp_dir_fe(img: &mut [u8], lba: usize, fids: &[u8]) {
+        let o = lba * BS;
+        img[o + 34..o + 36].copy_from_slice(&3u16.to_le_bytes()); // inline alloc
+        img[o + 27] = 4; // ICBTag FileType = directory
+        img[o + 56..o + 64].copy_from_slice(&(fids.len() as u64).to_le_bytes());
+        img[o + 168..o + 172].copy_from_slice(&0u32.to_le_bytes()); // L_EA
+        img[o + 172..o + 176].copy_from_slice(&(fids.len() as u32).to_le_bytes()); // L_AD
+        img[o + 176..o + 176 + fids.len()].copy_from_slice(fids);
+        stamp_tag(img, lba, crate::TAG_FE, 200);
+    }
+
+    /// A complete minimal 512-byte-block UDF: AVDP → VDS(PD, LVD, LVID, TERM) →
+    /// FSD → root dir (one subdir, one inline file) → subdir → file.
+    fn minimal_udf() -> Vec<u8> {
+        let mut img = vec![0u8; BS * 280];
+        let part_start = 0u32;
+
+        // AVDP @256 → VDS at LBA 260, length 4 blocks.
+        let a = 256 * BS;
+        img[a + 16..a + 20].copy_from_slice(&(4u32 * BS as u32).to_le_bytes()); // vds_len bytes
+        img[a + 20..a + 24].copy_from_slice(&260u32.to_le_bytes()); // vds_loc
+        stamp_tag(&mut img, 256, crate::TAG_AVDP, 16);
+
+        // PD @260: partition number 0, starting location = part_start.
+        let p = 260 * BS;
+        img[p + 22..p + 24].copy_from_slice(&0u16.to_le_bytes());
+        img[p + 188..p + 192].copy_from_slice(&part_start.to_le_bytes());
+        stamp_tag(&mut img, 260, crate::TAG_PD, 200);
+
+        // LVD @261: FSD ICB long_ad @248 (lbn@252), partition ref 0; one Type-1
+        // partition map (N_PM=1, map_table_len=6) at byte 440.
+        let l = 261 * BS;
+        img[l + 252..l + 256].copy_from_slice(&3u32.to_le_bytes()); // FSD logical block 3 → LBA 3
+        img[l + 256..l + 258].copy_from_slice(&0u16.to_le_bytes()); // partition reference
+        img[l + 264..l + 268].copy_from_slice(&6u32.to_le_bytes()); // map table length
+        img[l + 268..l + 272].copy_from_slice(&1u32.to_le_bytes()); // N_PM
+        img[l + 440] = 1; // map type 1
+        img[l + 441] = 6; // map length
+        img[l + 444..l + 446].copy_from_slice(&0u16.to_le_bytes()); // partition number
+        stamp_tag(&mut img, 261, crate::TAG_LVD, 400);
+
+        // LVID @262 — a descriptor the bootstrap walk recognises but does not
+        // terminate on (exercises the `audit_tag_at` non-terminator arm), then a
+        // zero sector @263 terminates the VDS walk.
+        stamp_tag(&mut img, 262, 9, 80);
+
+        // FSD @3: recording time + Root Directory ICB (lbn@404) = logical 4.
+        let f = 3 * BS;
+        img[f + 16 + 2..f + 16 + 4].copy_from_slice(&2026i16.to_le_bytes()); // year
+        img[f + 16 + 4] = 6;
+        img[f + 16 + 5] = 21;
+        img[f + 404..f + 408].copy_from_slice(&4u32.to_le_bytes()); // root FE logical block 4
+        stamp_tag(&mut img, 3, crate::TAG_FSD, 400);
+
+        // Root directory FE @4: inline FIDs → subdir (lbn 6) + file (lbn 7).
+        let mut fids = vec![0u8; 160];
+        let n = write_fid(&mut fids, 0, 6, true, b"sub");
+        let _ = write_fid(&mut fids, n, 7, false, b"f.txt");
+        let total = n + ((16 + 2 + 1 + 1 + 16 + 2 + 5 + 3) & !3);
+        stamp_dir_fe(&mut img, 4, &fids[..total]);
+
+        // Subdirectory FE @6: empty inline directory.
+        stamp_dir_fe(&mut img, 6, &[]);
+
+        // File FE @7: inline regular file, 4 bytes.
+        let ff = 7 * BS;
+        img[ff + 34..ff + 36].copy_from_slice(&3u16.to_le_bytes()); // inline
+        img[ff + 27] = 5; // regular file
+        img[ff + 56..ff + 64].copy_from_slice(&4u64.to_le_bytes());
+        img[ff + 168..ff + 172].copy_from_slice(&0u32.to_le_bytes());
+        img[ff + 172..ff + 176].copy_from_slice(&4u32.to_le_bytes());
+        img[ff + 176..ff + 180].copy_from_slice(b"abcd");
+        stamp_tag(&mut img, 7, crate::TAG_FE, 200);
+
+        img
+    }
+
+    #[test]
+    fn analyze_walks_subdirectory_clean() {
+        let img = minimal_udf();
+        let mut r = Cursor::new(img);
+        // The hand-built image is internally consistent: every descriptor tag
+        // verifies, the file post-dates nothing, and inline data has no slack —
+        // so the recursion into the subdirectory must complete with no anomaly.
+        let a = analyze(&mut r).expect("minimal UDF analyzes");
+        assert!(
+            a.is_empty(),
+            "internally consistent minimal UDF must be clean, got: {a:?}"
+        );
+    }
+
+    #[test]
+    fn audit_tag_at_ignores_unrecognised_identifier() {
+        // A sector whose first two bytes are a tag id this crate does not map —
+        // there is nothing to validate, so no anomaly and the id is returned.
+        let mut img = vec![0u8; BS];
+        img[0..2].copy_from_slice(&0x7FFFu16.to_le_bytes());
+        let mut r = Cursor::new(img);
+        let mut out = Vec::new();
+        let tag = audit_tag_at(&mut r, BS as u32, 0, &mut out).unwrap();
+        assert_eq!(tag, 0x7FFF);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn audit_tag_at_skips_crc_when_length_overflows_block() {
+        // A recognised descriptor whose DescriptorCRCLength exceeds the block —
+        // the CRC check is skipped (defensive bound), but the checksum still runs
+        // and, being valid here, yields no anomaly.
+        let mut img = vec![0u8; BS];
+        img[0..2].copy_from_slice(&crate::TAG_FSD.to_le_bytes());
+        img[10..12].copy_from_slice(&0xFFFFu16.to_le_bytes()); // crc_len > block
+        img[4] = crate::tag_checksum(&img[..16]); // valid checksum
+        let mut r = Cursor::new(img);
+        let mut out = Vec::new();
+        audit_tag_at(&mut r, BS as u32, 0, &mut out).unwrap();
+        assert!(
+            out.is_empty(),
+            "oversized crc_len skips CRC, valid checksum is clean"
+        );
+    }
+
+    #[test]
+    fn walk_skips_already_visited_directory_cycle() {
+        // Point the subdirectory's FID back at the root File Entry, forming a
+        // cycle; the `visited` guard must break it (no infinite loop, no
+        // duplicate audit).
+        let mut img = minimal_udf();
+        let mut fids = vec![0u8; 64];
+        let total = write_fid(&mut fids, 0, 4, true, b"up");
+        stamp_dir_fe(&mut img, 6, &fids[..total]);
+        let mut r = Cursor::new(img);
+        let a = analyze(&mut r).expect("cyclic UDF still terminates");
+        assert!(a.is_empty(), "cycle must be skipped cleanly, got: {a:?}");
+    }
+}

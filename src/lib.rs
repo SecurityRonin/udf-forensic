@@ -1153,13 +1153,64 @@ mod findings_support_tests {
 
     #[test]
     fn descriptor_label_known_and_unknown() {
-        assert_eq!(descriptor_label(TAG_FSD), Some("FileSetDescriptor"));
-        assert_eq!(descriptor_label(TAG_EFE), Some("ExtendedFileEntry"));
-        assert_eq!(
-            descriptor_label(9),
-            Some("LogicalVolumeIntegrityDescriptor")
-        );
+        // Every mapped ECMA-167 / UDF descriptor identifier resolves to a name
+        // so a walked descriptor of any type is reported by name, not a number.
+        for (id, name) in [
+            (TAG_FSD, "FileSetDescriptor"),
+            (TAG_EFE, "ExtendedFileEntry"),
+            (TAG_FID, "FileIdentifierDescriptor"),
+            (TAG_FE, "FileEntry"),
+            (TAG_FE_ALT, "FileEntry"),
+            (1, "PrimaryVolumeDescriptor"),
+            (3, "VolumeDescriptorPointer"),
+            (4, "ImplementationUseVolumeDescriptor"),
+            (7, "UnallocatedSpaceDescriptor"),
+            (9, "LogicalVolumeIntegrityDescriptor"),
+            (258, "AllocationExtentDescriptor"),
+            (259, "IndirectEntry"),
+            (262, "SpaceBitmapDescriptor"),
+            (263, "PartitionIntegrityEntry"),
+            (264, "ExtendedAttributeHeaderDescriptor"),
+            (265, "UnallocatedSpaceEntry"),
+        ] {
+            assert_eq!(descriptor_label(id), Some(name), "tag {id}");
+        }
         assert_eq!(descriptor_label(0xFFFF), None);
+    }
+
+    #[test]
+    fn fsd_recording_time_none_for_non_fsd() {
+        let img = vec![0u8; 512];
+        let mut r = Cursor::new(img);
+        assert_eq!(fsd_recording_time(&mut r, 512, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn last_block_pos_none_for_non_file_entry() {
+        let img = vec![0u8; 512];
+        let mut r = Cursor::new(img);
+        assert_eq!(fe_last_block_pos(&mut r, 512, 0, 0), None);
+    }
+
+    #[test]
+    fn slack_via_long_allocation_descriptor() {
+        // A 16-byte long_ad (alloc type 1) exercises the ALLOC_LONG stride.
+        let bs = 512usize;
+        let mut img = vec![0u8; bs * 8];
+        let fe = 4 * bs;
+        img[fe..fe + 2].copy_from_slice(&TAG_FE.to_le_bytes());
+        img[fe + 34..fe + 36].copy_from_slice(&1u16.to_le_bytes()); // long_ad alloc
+        img[fe + 56..fe + 64].copy_from_slice(&100u64.to_le_bytes());
+        img[fe + 168..fe + 172].copy_from_slice(&0u32.to_le_bytes()); // L_EA
+        img[fe + 172..fe + 176].copy_from_slice(&16u32.to_le_bytes()); // L_AD = one long_ad
+        img[fe + 176..fe + 180].copy_from_slice(&100u32.to_le_bytes()); // extent_length
+        img[fe + 180..fe + 184].copy_from_slice(&5u32.to_le_bytes()); // logical block num
+        let data = 5 * bs + 100;
+        img[data] = 0x7F;
+        let mut r = Cursor::new(img);
+        let (nonzero, slack) = fe_slack_nonzero(&mut r, 512, 0, 4).expect("slack present");
+        assert_eq!(slack, 412);
+        assert_eq!(nonzero, 1);
     }
 
     #[test]
