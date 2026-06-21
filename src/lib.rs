@@ -90,6 +90,10 @@ pub struct UdfState {
     pub root_fe_lba: u32,
     pub partition_kind: UdfPartitionKind,
     pub partition_map_count: u32,
+    /// The medium's logical block size in bytes (512, 1024, 2048, or 4096),
+    /// detected from the Anchor Volume Descriptor Pointer location rather than
+    /// assumed — optical UDF is 2048-byte, but hard-disk media is 512-byte.
+    pub block_size: u32,
 }
 
 // ── UDF detection (existing public API) ──────────────────────────────────────
@@ -160,6 +164,7 @@ pub fn parse_udf_state_checked<R: Read + Seek>(
         root_fe_lba,
         partition_kind: vds.partition_kind,
         partition_map_count: vds.map_count,
+        block_size: 2048,
     }))
 }
 
@@ -720,6 +725,33 @@ mod real_media_tests {
         assert_eq!(
             st.partition_map_count, 1,
             "dvdrw/2.01 carries a single Sparable Type-2 map"
+        );
+    }
+
+    /// `udfinfo udf_plain.img` reports `udfrev=2.01`, `blocksize=512`, and a
+    /// single physical partition at `start=257, type=PSPACE`. The mkudffs `hd`
+    /// profile writes 512-byte logical blocks, so the AVDP lives at byte
+    /// 256×512, not 256×2048 — this image only parses once the block size is
+    /// detected from the medium rather than assumed to be 2048.
+    #[test]
+    fn plain_512_block_image_parses_via_detected_block_size() {
+        let path = format!("{}/tests/data/udf_plain.img", env!("CARGO_MANIFEST_DIR"));
+        let mut f = File::open(&path).expect("udf_plain.img fixture must be present");
+        let st = super::parse_udf_state(&mut f)
+            .expect("512-byte-block UDF must parse once the block size is detected from the AVDP");
+        assert_eq!(st.block_size, 512, "udfinfo reports blocksize=512");
+        assert_eq!(
+            st.partition_kind,
+            UdfPartitionKind::Physical,
+            "mkudffs hd image is a Type-1 physical partition"
+        );
+        assert_eq!(
+            st.partition_start, 257,
+            "partition start must match udfinfo PSPACE start=257"
+        );
+        assert_eq!(
+            st.partition_map_count, 1,
+            "hd/2.01 carries a single physical map"
         );
     }
 }
