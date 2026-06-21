@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
-description = "Forensic-grade, from-scratch UDF (ECMA-167 / OSTA) reader — volume recognition, partition maps (physical/virtual/sparable/metadata), File Entry and directory (FID) traversal, and file data over any Read + Seek source"
+description = "Forensic-grade, from-scratch UDF (ECMA-167 / OSTA) reader and tamper analyzer — volume recognition, partition maps (physical/virtual/sparable/metadata), File Entry and directory (FID) traversal, file data, plus graded findings (tag CRC/checksum, orphan File Entries, slack, file-after-volume) over any Read + Seek source"
 repository = "https://github.com/SecurityRonin/udf-forensic"
 homepage = "https://github.com/SecurityRonin/udf-forensic"
 documentation = "https://docs.rs/udf-forensic"
@@ -17,9 +17,10 @@ categories = ["parser-implementations", "filesystem"]
 exclude = ["tests/data/*.img"]
 
 [features]
-serde = ["dep:serde"]
+serde = ["dep:serde", "forensicnomicon/serde"]
 
 [dependencies]
+forensicnomicon = "0.7"
 serde = { version = "1", optional = true, features = ["derive"] }
 
 [lints.rust]
