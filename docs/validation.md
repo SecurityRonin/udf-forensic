@@ -60,7 +60,7 @@ rather than gitignored. The partition-map tests run against them in CI.
 |---|---|---|---|---|
 | `udf_vat.img` | `mkudffs --media-type=cdr --udfrev=0x0150` (UDF 1.50) | Virtual (VAT) classification + PSPACE start 257 | `1258d2b1…9eac84` | mkudffs output, freely redistributable |
 | `udf_spar.img` | `mkudffs --media-type=dvdrw --udfrev=0x0201` (UDF 2.01) | Sparable classification + PSPACE start 1296 | `70285bf8…ae6ee6` | mkudffs output, freely redistributable |
-| `udf_plain.img` | `mkudffs --media-type=hd --udfrev=0x0201` (UDF 2.01, 512-byte blocks) | Documents the fixed-2048-block-size limitation (not asserted) | `31d06a99…c4e30` | mkudffs output, freely redistributable |
+| `udf_plain.img` | `mkudffs --media-type=hd --udfrev=0x0201` (UDF 2.01, 512-byte blocks) | Physical classification + 512-byte block-size detection + PSPACE start 257 | `31d06a99…c4e30` | mkudffs output, freely redistributable |
 
 Per-file provenance lives in `tests/data/README.md`; the fleet-wide machine index
 is `issen/docs/corpus-catalog.md`.
@@ -74,22 +74,27 @@ the in-crate bootstrap tests over hand-built buffers. No independent oracle
 (`isoinfo`/`xorriso`) confirms the recognition decision on a real disc yet —
 **recommended gap.**
 
-### Partition-map classification (Virtual / Sparable) — Tier 1
+### Partition-map classification + block-size detection — Tier 1
 
 `src/lib.rs` `mod real_media_tests` asserts, against committed real `mkudffs`
-images, that the `cdr`/UDF 1.50 image classifies as `Virtual` and the
-`dvdrw`/UDF 2.01 image as `Sparable`:
+images, that each image classifies correctly and resolves its partition start —
+across **two media sector sizes** (2048-byte optical and 512-byte hard-disk):
 
-- `vat_image_classified_virtual` (`src/lib.rs:649`) and
-  `sparable_image_classified_sparable` (`src/lib.rs:662`) — the kind assertion.
-- `vat_image_matches_udfinfo_oracle` (`src/lib.rs:685`) and
-  `sparable_image_matches_udfinfo_oracle` (`src/lib.rs:709`) — the **independent
-  oracle differential**: each asserts that this crate's resolved
-  `partition_start` equals the `PSPACE` start block reported by `udfinfo` (257 for
-  the VAT image, 1296 for the Sparable image), and that `partition_map_count`
-  matches the media-type's map layout (2 for cdr, 1 for dvdrw). The expected
-  values are the oracle's reported ground truth — captured verbatim in
-  `tests/data/README.md` — not recomputed by this crate.
+- `vat_image_classified_virtual` and `sparable_image_classified_sparable` — the
+  kind assertion (`cdr`/1.50 → `Virtual`, `dvdrw`/2.01 → `Sparable`).
+- `vat_image_matches_udfinfo_oracle` and `sparable_image_matches_udfinfo_oracle`
+  — the **independent oracle differential**: each asserts this crate's resolved
+  `partition_start` equals the `PSPACE` start block `udfinfo` reports (257 for the
+  VAT image, 1296 for the Sparable image), and `partition_map_count` matches the
+  media-type's layout (2 for cdr, 1 for dvdrw).
+- `plain_512_block_image_parses_via_detected_block_size` — the **512-byte-block**
+  case: the `hd`/2.01 image's Anchor Volume Descriptor Pointer lives at byte
+  `256 × 512`, so it parses only because the crate detects the block size from the
+  AVDP location rather than assuming 2048. Asserts `block_size = 512`, a `Physical`
+  partition, `partition_start = 257`, one map — reconciled against `udfinfo`.
+
+All expected values are the oracle's reported ground truth — captured verbatim in
+`tests/data/README.md` — not recomputed by this crate.
 
 This is Tier 1: a real third-party tool authored both the artifact (`mkudffs`)
 and the answer key (`udfinfo`), and a separate codebase re-decodes the same bytes.

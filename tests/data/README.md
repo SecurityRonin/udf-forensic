@@ -101,7 +101,7 @@ on any udftools 2.3 host.
   The 1024-block `SSPACE` (sparing space) sits before the partition space, so `PSPACE` starts at
   block 1296 — which this crate independently resolves as `partition_start = 1296`.
 
-#### udf_plain.img — UDF 2.01, hd media, 512-byte blocks (supplementary)
+#### udf_plain.img — UDF 2.01, hd media, 512-byte blocks
 
 - **Source:** a UDF 2.01 image authored by `mkudffs` for hard-disk media. Plain physical partition,
   **512-byte block size**.
@@ -111,12 +111,12 @@ on any udftools 2.3 host.
   mkudffs --media-type=hd --udfrev=0x0201 udf_plain.img
   ```
 - **Size / MD5:** 8 388 608 bytes - `31d06a9942f8bc4983617631a9ac4e30`
-- **Consumed by:** not asserted in a test today. It is committed as a **documented limitation marker**:
-  this crate currently assumes a 2048-byte logical block (the AVDP is read at byte offset `256 * 2048`),
-  so it returns `parse_udf_state == None` on this 512-byte-block image even though `detect_udf` finds the
-  NSR recognition sequence. `udfinfo` reads it correctly (`blocksize=512`, `udfrev=2.01`,
-  `start=257, blocks=15864, type=PSPACE`). Keeping the fixture documents the gap and seeds a future
-  variable-block-size test.
+- **Consumed by:** `real_media_tests::plain_512_block_image_parses_via_detected_block_size`. This is the
+  512-byte-block oracle case: the crate detects the block size from the AVDP location (the anchor is at
+  byte `256 × 512`, not `256 × 2048`) and resolves a **physical** partition at `partition_start = 257`
+  with one map. Reconciled against `udfinfo` (`blocksize=512`, `udfrev=2.01`, `start=257, blocks=15864,
+  type=PSPACE`). Together with the 2048-byte `vat`/`spar` images it exercises block-size detection across
+  two media sector sizes.
 
 ## Reproducing the corpus on a non-Linux host
 
