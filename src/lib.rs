@@ -43,6 +43,15 @@ const ALLOC_INLINE: u16 = 3;
 // Extent type bits 30-31 of extent_length field
 const EXTENT_RECORDED: u32 = 0x0000_0000; // 0b00 in bits 30-31
 
+// ── Logical block size ────────────────────────────────────────────────────────
+
+/// Largest logical block size we read into a stack sector buffer.
+const MAX_BLOCK_SIZE: usize = 4096;
+
+/// Candidate UDF logical block sizes, most-common first. Optical media (CD/DVD/
+/// BD) use 2048; hard-disk and USB UDF use 512; Advanced-Format media use 4096.
+const BLOCK_SIZE_CANDIDATES: [u32; 4] = [2048, 512, 1024, 4096];
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// A single entry returned by UDF directory traversal.
@@ -150,13 +159,17 @@ pub fn parse_udf_state<R: Read + Seek>(reader: &mut R) -> Option<UdfState> {
 pub fn parse_udf_state_checked<R: Read + Seek>(
     reader: &mut R,
 ) -> Result<Option<UdfState>, io::Error> {
-    let Some((vds_loc, vds_len)) = read_avdp_checked(reader)? else {
+    let Some(block_size) = detect_block_size(reader)? else {
         return Ok(None);
     };
-    let Some(vds) = read_vds_checked(reader, vds_loc, vds_len)? else {
+    let Some((vds_loc, vds_len)) = read_avdp_checked(reader, block_size)? else {
         return Ok(None);
     };
-    let Some(root_fe_lba) = read_fsd_checked(reader, vds.fsd_lba, vds.partition_start)? else {
+    let Some(vds) = read_vds_checked(reader, block_size, vds_loc, vds_len)? else {
+        return Ok(None);
+    };
+    let Some(root_fe_lba) = read_fsd_checked(reader, block_size, vds.fsd_lba, vds.partition_start)?
+    else {
         return Ok(None);
     };
     Ok(Some(UdfState {
@@ -164,7 +177,7 @@ pub fn parse_udf_state_checked<R: Read + Seek>(
         root_fe_lba,
         partition_kind: vds.partition_kind,
         partition_map_count: vds.map_count,
-        block_size: 2048,
+        block_size,
     }))
 }
 
@@ -240,21 +253,24 @@ fn parse_partition_maps(lvd: &[u8]) -> Vec<PartitionMap> {
 /// File Entry resides at `dir_fe_lba`, returning one `UdfFileEntry` per child.
 pub fn read_dir_at_lba<R: Read + Seek>(
     reader: &mut R,
+    block_size: u32,
     partition_start: u32,
     dir_fe_lba: u32,
 ) -> Option<Vec<UdfFileEntry>> {
-    let dir_data = read_fe_data(reader, partition_start, dir_fe_lba)?;
-    Some(parse_fids(reader, partition_start, &dir_data))
+    let dir_data = read_fe_data(reader, block_size, partition_start, dir_fe_lba)?;
+    Some(parse_fids(reader, block_size, partition_start, &dir_data))
 }
 
 /// Read the data extent of the File Entry at `fe_lba`.
 pub fn read_fe_data<R: Read + Seek>(
     reader: &mut R,
+    block_size: u32,
     partition_start: u32,
     fe_lba: u32,
 ) -> Option<Vec<u8>> {
-    let mut sector = [0u8; 2048];
-    seek_read(reader, fe_lba as u64 * 2048, &mut sector)?;
+    let mut sector = [0u8; MAX_BLOCK_SIZE];
+    let sector = &mut sector[..block_size as usize];
+    seek_read(reader, fe_lba as u64 * block_size as u64, sector)?;
 
     let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
     let is_efe = tag_ident == TAG_EFE;
@@ -288,20 +304,61 @@ pub fn read_fe_data<R: Read + Seek>(
 
     match alloc_type {
         ALLOC_INLINE => Some(ad_area[..info_len.min(ad_area.len() as u64) as usize].to_vec()),
-        ALLOC_SHORT => read_extents_short(reader, partition_start, &ad_area, info_len),
-        ALLOC_LONG => read_extents_long(reader, partition_start, &ad_area, info_len),
+        ALLOC_SHORT => read_extents_short(reader, block_size, partition_start, &ad_area, info_len),
+        ALLOC_LONG => read_extents_long(reader, block_size, partition_start, &ad_area, info_len),
         _ => None,
     }
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Parse AVDP at LBA 256. `Err` on a read I/O failure, `Ok(None)` when the
-/// anchor read succeeds but is not an AVDP, `Ok(Some((vds_loc, vds_len)))` when
-/// the anchor is valid.
-fn read_avdp_checked<R: Read + Seek>(reader: &mut R) -> Result<Option<(u32, u32)>, io::Error> {
-    let mut sector = [0u8; 2048];
-    seek_read_checked(reader, 256 * 2048, &mut sector)?;
+/// Detect the medium's logical block size by locating the Anchor Volume
+/// Descriptor Pointer (ECMA-167 §3 / OSTA UDF §2.2.3): the AVDP sits at logical
+/// sector 256, so for each candidate block size `bs` the anchor is at byte
+/// `256 * bs`. A candidate is accepted when that sector carries the AVDP tag
+/// identifier (2) AND the descriptor tag's recorded location field equals 256 —
+/// the location check rules out a stray `0x0002` at the wrong probe offset.
+///
+/// Truncation handling mirrors [`read_avdp_checked`]: if *no* candidate's anchor
+/// was even large enough to read (every probe hit `UnexpectedEof`), the image is
+/// truncated before any possible AVDP and that surfaces as `Err`; if some probe
+/// read but none matched, the source is readable-but-not-UDF (`Ok(None)`).
+fn detect_block_size<R: Read + Seek>(reader: &mut R) -> Result<Option<u32>, io::Error> {
+    let mut tag = [0u8; 16];
+    let mut last_eof: Option<io::Error> = None;
+    let mut any_read_ok = false;
+    for bs in BLOCK_SIZE_CANDIDATES {
+        match seek_read_checked(reader, 256 * bs as u64, &mut tag) {
+            Ok(()) => {
+                any_read_ok = true;
+                let tag_ident = u16::from_le_bytes([tag[0], tag[1]]);
+                let tag_location = u32::from_le_bytes(tag[12..16].try_into().unwrap());
+                if tag_ident == TAG_AVDP && tag_location == 256 {
+                    return Ok(Some(bs));
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => last_eof = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    if !any_read_ok {
+        if let Some(e) = last_eof {
+            return Err(e);
+        }
+    }
+    Ok(None)
+}
+
+/// Parse the AVDP at logical sector 256 (`256 * block_size` bytes). `Err` on a
+/// read I/O failure, `Ok(None)` when the anchor read succeeds but is not an
+/// AVDP, `Ok(Some((vds_loc, vds_len)))` when the anchor is valid.
+fn read_avdp_checked<R: Read + Seek>(
+    reader: &mut R,
+    block_size: u32,
+) -> Result<Option<(u32, u32)>, io::Error> {
+    let mut sector = [0u8; MAX_BLOCK_SIZE];
+    let sector = &mut sector[..block_size as usize];
+    seek_read_checked(reader, 256 * block_size as u64, sector)?;
     if u16::from_le_bytes([sector[0], sector[1]]) != TAG_AVDP {
         return Ok(None);
     }
@@ -316,11 +373,12 @@ fn read_avdp_checked<R: Read + Seek>(reader: &mut R) -> Result<Option<(u32, u32)
 /// the file set's partition through its map.
 fn read_vds_checked<R: Read + Seek>(
     reader: &mut R,
+    block_size: u32,
     vds_loc: u32,
     vds_len: u32,
 ) -> Result<Option<VdsInfo>, io::Error> {
     use std::collections::HashMap;
-    let sectors = (vds_len as usize).div_ceil(2048);
+    let sectors = (vds_len as usize).div_ceil(block_size as usize);
 
     // partition number → starting location (physical LBA).
     let mut pd_start: HashMap<u16, u32> = HashMap::new();
@@ -329,8 +387,13 @@ fn read_vds_checked<R: Read + Seek>(
     let mut maps: Vec<PartitionMap> = Vec::new();
 
     for i in 0..sectors {
-        let mut sector = [0u8; 2048];
-        seek_read_checked(reader, (vds_loc as u64 + i as u64) * 2048, &mut sector)?;
+        let mut sector = [0u8; MAX_BLOCK_SIZE];
+        let sector = &mut sector[..block_size as usize];
+        seek_read_checked(
+            reader,
+            (vds_loc as u64 + i as u64) * block_size as u64,
+            sector,
+        )?;
         let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
         match tag_ident {
             TAG_PD => {
@@ -343,7 +406,7 @@ fn read_vds_checked<R: Read + Seek>(
                 // logical_block_num [252..256], partition_reference [256..258].
                 fsd_lbn = Some(u32::from_le_bytes(sector[252..256].try_into().unwrap()));
                 fsd_part_ref = u16::from_le_bytes([sector[256], sector[257]]);
-                maps = parse_partition_maps(&sector);
+                maps = parse_partition_maps(sector);
             }
             TAG_TERM | 0 => break,
             _ => {}
@@ -385,11 +448,13 @@ fn read_vds_checked<R: Read + Seek>(
 /// tag is not an FSD, `Ok(Some(root_fe_lba))` when the FSD is valid.
 fn read_fsd_checked<R: Read + Seek>(
     reader: &mut R,
+    block_size: u32,
     fsd_lba: u32,
     partition_start: u32,
 ) -> Result<Option<u32>, io::Error> {
-    let mut sector = [0u8; 2048];
-    seek_read_checked(reader, fsd_lba as u64 * 2048, &mut sector)?;
+    let mut sector = [0u8; MAX_BLOCK_SIZE];
+    let sector = &mut sector[..block_size as usize];
+    seek_read_checked(reader, fsd_lba as u64 * block_size as u64, sector)?;
     if u16::from_le_bytes([sector[0], sector[1]]) != TAG_FSD {
         return Ok(None);
     }
@@ -441,6 +506,7 @@ fn detect_fid_tag_size(data: &[u8]) -> usize {
 /// Parse File Identifier Descriptors from raw directory data.
 fn parse_fids<R: Read + Seek>(
     reader: &mut R,
+    block_size: u32,
     partition_start: u32,
     data: &[u8],
 ) -> Vec<UdfFileEntry> {
@@ -500,7 +566,7 @@ fn parse_fids<R: Read + Seek>(
             };
 
             // Read the FE to get the canonical file size.
-            let size = read_fe_info_len(reader, fe_lba).unwrap_or(0);
+            let size = read_fe_info_len(reader, block_size, fe_lba).unwrap_or(0);
 
             entries.push(UdfFileEntry {
                 name,
@@ -516,9 +582,10 @@ fn parse_fids<R: Read + Seek>(
 }
 
 /// Read the Information Length (file size) from a File Entry at `fe_lba`.
-fn read_fe_info_len<R: Read + Seek>(reader: &mut R, fe_lba: u32) -> Option<u64> {
-    let mut sector = [0u8; 2048];
-    seek_read(reader, fe_lba as u64 * 2048, &mut sector)?;
+fn read_fe_info_len<R: Read + Seek>(reader: &mut R, block_size: u32, fe_lba: u32) -> Option<u64> {
+    let mut sector = [0u8; MAX_BLOCK_SIZE];
+    let sector = &mut sector[..block_size as usize];
+    seek_read(reader, fe_lba as u64 * block_size as u64, sector)?;
     let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
     if tag_ident != TAG_FE && tag_ident != TAG_FE_ALT && tag_ident != TAG_EFE {
         return None;
@@ -529,6 +596,7 @@ fn read_fe_info_len<R: Read + Seek>(reader: &mut R, fe_lba: u32) -> Option<u64> 
 /// Collect data from short allocation descriptors (8 bytes each).
 fn read_extents_short<R: Read + Seek>(
     reader: &mut R,
+    block_size: u32,
     partition_start: u32,
     ad_area: &[u8],
     total_len: u64,
@@ -541,8 +609,8 @@ fn read_extents_short<R: Read + Seek>(
         let ext_type = len_raw >> 30;
         let ext_len = (len_raw & 0x3FFF_FFFF) as usize;
         if ext_type == (EXTENT_RECORDED >> 30) && ext_len > 0 {
-            let phys = (partition_start as u64 + ext_pos as u64) * 2048;
-            read_extent(reader, phys, ext_len, total_len, &mut data)?;
+            let phys = (partition_start as u64 + ext_pos as u64) * block_size as u64;
+            read_extent(reader, block_size, phys, ext_len, total_len, &mut data)?;
         }
         pos += 8;
     }
@@ -553,6 +621,7 @@ fn read_extents_short<R: Read + Seek>(
 /// Collect data from long allocation descriptors (16 bytes each).
 fn read_extents_long<R: Read + Seek>(
     reader: &mut R,
+    block_size: u32,
     partition_start: u32,
     ad_area: &[u8],
     total_len: u64,
@@ -565,8 +634,8 @@ fn read_extents_long<R: Read + Seek>(
         let ext_type = len_raw >> 30;
         let ext_len = (len_raw & 0x3FFF_FFFF) as usize;
         if ext_type == (EXTENT_RECORDED >> 30) && ext_len > 0 {
-            let phys = (partition_start as u64 + lbn as u64) * 2048;
-            read_extent(reader, phys, ext_len, total_len, &mut data)?;
+            let phys = (partition_start as u64 + lbn as u64) * block_size as u64;
+            read_extent(reader, block_size, phys, ext_len, total_len, &mut data)?;
         }
         pos += 16;
     }
@@ -577,18 +646,21 @@ fn read_extents_long<R: Read + Seek>(
 /// Read `ext_len` bytes from `byte_pos`, appending to `data` up to `total_len`.
 fn read_extent<R: Read + Seek>(
     reader: &mut R,
+    block_size: u32,
     byte_pos: u64,
     ext_len: usize,
     total_len: u64,
     data: &mut Vec<u8>,
 ) -> Option<()> {
-    let sectors = ext_len.div_ceil(2048);
+    let bs = block_size as usize;
+    let sectors = ext_len.div_ceil(bs);
     for i in 0..sectors {
-        let mut sector = [0u8; 2048];
-        seek_read(reader, byte_pos + i as u64 * 2048, &mut sector)?;
+        let mut sector = [0u8; MAX_BLOCK_SIZE];
+        let sector = &mut sector[..bs];
+        seek_read(reader, byte_pos + i as u64 * block_size as u64, sector)?;
         let already = data.len() as u64;
         let remaining = total_len.saturating_sub(already) as usize;
-        let sector_bytes = (ext_len - i * 2048).min(2048);
+        let sector_bytes = (ext_len - i * bs).min(bs);
         let take = sector_bytes.min(remaining);
         data.extend_from_slice(&sector[..take]);
     }
