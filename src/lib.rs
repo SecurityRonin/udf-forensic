@@ -305,9 +305,15 @@ pub fn read_fe_data<R: Read + Seek>(
     let alloc_type = icb_flags & 0x0007;
     let info_len = u64::from_le_bytes(sector[56..64].try_into().unwrap());
 
-    // EFE has an additional ObjectSize (8 bytes) field before L_EA / L_AD.
+    // Base File Entry (ECMA-167 4/14.9): L_EA @168, L_AD @172, area @176.
+    // Extended File Entry (4/14.17) inserts ObjectSize(8), CreationTime(12),
+    // StreamDirectoryICB(16), and Reserved(4) — 40 bytes total — ahead of the
+    // extended-attr / alloc-descriptor lengths, so L_EA @208, L_AD @212, area
+    // @216. (The pre-EFE value 176/180/184 assumed only the 8-byte ObjectSize
+    // insertion and is wrong for a real EFE — verified against a real mkudffs
+    // Extended-File-Entry root directory.)
     let (ea_off, ad_off, header) = if is_efe {
-        (176usize, 180usize, 184usize)
+        (208usize, 212usize, 216usize)
     } else {
         (168usize, 172usize, 176usize)
     };
@@ -616,6 +622,33 @@ fn read_fe_info_len<R: Read + Seek>(reader: &mut R, block_size: u32, fe_lba: u32
     Some(u64::from_le_bytes(sector[56..64].try_into().unwrap()))
 }
 
+/// Read the ICB Tag File Type of the File Entry at `fe_lba` (ECMA-167 4/14.6.6):
+/// the descriptor tag is 16 bytes, the ICB Tag follows it, and its File Type
+/// field sits at ICB-Tag offset 11 (FE offset 27). `4` = directory, `5` = a
+/// regular file. `None` when the sector is not a File Entry / Extended File
+/// Entry, so a non-FE LBA passed to a directory op is told apart from a file.
+///
+/// Used by the `vfs` adapter to classify an arbitrary File Entry LBA.
+#[cfg(feature = "vfs")]
+pub(crate) fn read_fe_file_type<R: Read + Seek>(
+    reader: &mut R,
+    block_size: u32,
+    fe_lba: u32,
+) -> Option<u8> {
+    let mut sector = [0u8; MAX_BLOCK_SIZE];
+    let sector = &mut sector[..block_size as usize];
+    seek_read(reader, fe_lba as u64 * block_size as u64, sector)?;
+    let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
+    if tag_ident != TAG_FE && tag_ident != TAG_FE_ALT && tag_ident != TAG_EFE {
+        return None;
+    }
+    sector.get(27).copied()
+}
+
+/// ECMA-167 ICB Tag File Type for a directory (4/14.6.6).
+#[cfg(feature = "vfs")]
+pub(crate) const FILE_TYPE_DIRECTORY: u8 = 4;
+
 /// Collect data from short allocation descriptors (8 bytes each).
 fn read_extents_short<R: Read + Seek>(
     reader: &mut R,
@@ -889,8 +922,10 @@ fn fe_last_block_pos<R: Read + Seek>(
 
     let icb_flags = u16::from_le_bytes([sector[34], sector[35]]);
     let alloc_type = icb_flags & 0x0007;
+    // See `read_fe_data`: EFE shifts L_EA/L_AD/area to 208/212/216 (40 bytes of
+    // extra fields), not the 176/180/184 an 8-byte-only shift would give.
     let (ea_off, ad_off, header) = if is_efe {
-        (176usize, 180usize, 184usize)
+        (208usize, 212usize, 216usize)
     } else {
         (168usize, 172usize, 176usize)
     };

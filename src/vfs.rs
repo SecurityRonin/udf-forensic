@@ -49,7 +49,7 @@ use forensic_vfs::{
     SectorSizes, SmallHex, StreamId, TimeZonePolicy, VfsError, VfsResult,
 };
 
-use crate::{read_dir_at_lba, read_fe_data, UdfState};
+use crate::{read_dir_at_lba, read_fe_data, read_fe_file_type, UdfState, FILE_TYPE_DIRECTORY};
 
 /// Per-node metadata harvested from a parent File Identifier Descriptor and
 /// cached by File Entry LBA.
@@ -135,59 +135,221 @@ fn require_default_stream(stream: StreamId) -> VfsResult<()> {
     }
 }
 
+impl<R: Read + Seek + Send> UdfVfs<R> {
+    /// Resolve the cached `FeMeta` for `fe_lba`, or — for an uncached FE — read
+    /// its File Entry, classify it from the ICB Tag File Type, and cache it. A
+    /// sector that does not parse as a File Entry is a loud [`VfsError::Decode`]
+    /// (an untraversed *file* extent has no cached record and no self-classifiable
+    /// directory tag; UDF has no inode table, so it cannot be resolved).
+    fn resolve(inner: &mut Inner<R>, fe_lba: u32, block_size: u32) -> VfsResult<FeMeta> {
+        if let Some(m) = inner.cache.get(&fe_lba) {
+            return Ok(*m);
+        }
+        match read_fe_file_type(&mut inner.reader, block_size, fe_lba) {
+            Some(ft) => {
+                let is_dir = ft == FILE_TYPE_DIRECTORY;
+                let size =
+                    crate::read_fe_info_len(&mut inner.reader, block_size, fe_lba).unwrap_or(0);
+                let m = FeMeta { is_dir, size };
+                inner.cache.insert(fe_lba, m);
+                Ok(m)
+            }
+            None => Err(VfsError::Decode {
+                layer: "udf",
+                offset: u64::from(fe_lba) * u64::from(block_size),
+                detail: format!(
+                    "no File Entry at LBA {fe_lba}; enumerate its parent directory first"
+                ),
+                bytes: SmallHex::new(&[]),
+            }),
+        }
+    }
+
+    /// Read a directory's children, caching each child's `FeMeta`. A loud error
+    /// if `fe_lba` is not a directory File Entry.
+    fn dir_children(&self, fe_lba: u32) -> VfsResult<Vec<crate::UdfFileEntry>> {
+        let block_size = self.state.block_size;
+        let partition_start = self.state.partition_start;
+        let mut inner = self.lock();
+        // Classify first so a file (or a non-FE LBA) fails loud rather than
+        // yielding an empty listing.
+        let meta = Self::resolve(&mut inner, fe_lba, block_size)?;
+        if !meta.is_dir {
+            return Err(VfsError::Decode {
+                layer: "udf",
+                offset: u64::from(fe_lba) * u64::from(block_size),
+                detail: format!("File Entry at LBA {fe_lba} is not a directory"),
+                bytes: SmallHex::new(&[]),
+            });
+        }
+        let children = read_dir_at_lba(&mut inner.reader, block_size, partition_start, fe_lba)
+            .ok_or_else(|| VfsError::Decode {
+                layer: "udf",
+                offset: u64::from(fe_lba) * u64::from(block_size),
+                detail: format!("directory File Entry at LBA {fe_lba} could not be read"),
+                bytes: SmallHex::new(&[]),
+            })?;
+        for c in &children {
+            inner.cache.insert(
+                c.fe_lba,
+                FeMeta {
+                    is_dir: c.is_dir,
+                    size: c.size,
+                },
+            );
+        }
+        Ok(children)
+    }
+}
+
 impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
     fn kind(&self) -> FsKind {
-        todo!("RED: kind")
+        FsKind::Udf
     }
 
     fn root(&self) -> FileId {
-        todo!("RED: root")
+        FileId::Opaque(u64::from(self.state.root_fe_lba))
     }
 
     fn sector_sizes(&self) -> SectorSizes {
-        todo!("RED: sector_sizes")
+        SectorSizes {
+            logical: self.state.block_size,
+            physical: self.state.block_size,
+            cluster_or_block: self.state.block_size,
+        }
     }
 
     fn timestamp_zone(&self) -> TimeZonePolicy {
-        todo!("RED: timestamp_zone")
+        // ECMA-167 timestamps carry an explicit type/timezone; UDF's canonical
+        // interchange time is UTC-anchored.
+        TimeZonePolicy::Utc
     }
 
     fn read_dir(&self, ino: FileId) -> VfsResult<DirStream> {
-        let _ = ino;
-        todo!("RED: read_dir")
+        let fe_lba = fe_lba_of(ino)?;
+        let children = self.dir_children(fe_lba)?;
+        let out: Vec<VfsResult<VfsDirEntry>> = children
+            .into_iter()
+            .map(|c| {
+                Ok(VfsDirEntry {
+                    name: c.name.into_bytes(),
+                    id: FileId::Opaque(u64::from(c.fe_lba)),
+                    kind: if c.is_dir {
+                        NodeKind::Dir
+                    } else {
+                        NodeKind::File
+                    },
+                })
+            })
+            .collect();
+        Ok(DirStream::new(out.into_iter()))
     }
 
     fn extents(&self, ino: FileId, stream: StreamId) -> VfsResult<ExtentStream> {
-        let _ = (ino, stream);
-        todo!("RED: extents")
+        let fe_lba = fe_lba_of(ino)?;
+        require_default_stream(stream)?;
+        let block_size = self.state.block_size;
+        let mut inner = self.lock();
+        let meta = Self::resolve(&mut inner, fe_lba, block_size)?;
+        // First cut: the reader does not surface a File Entry's allocation
+        // descriptors, so a non-empty node yields one logical run (image_offset 0)
+        // rather than its true on-disk runs. See the module note.
+        if meta.size == 0 {
+            return Ok(ExtentStream::empty());
+        }
+        let run = RunInfo {
+            run: ByteRun {
+                image_offset: 0,
+                len: meta.size,
+                flags: RunFlags::default(),
+            },
+            alloc: RunAlloc::Allocated,
+        };
+        Ok(ExtentStream::new(std::iter::once(Ok(run))))
     }
 
     fn lookup(&self, parent: FileId, name: &[u8]) -> VfsResult<Option<FileId>> {
-        let _ = (parent, name);
-        todo!("RED: lookup")
+        let fe_lba = fe_lba_of(parent)?;
+        let children = self.dir_children(fe_lba)?;
+        for c in &children {
+            if name.eq_ignore_ascii_case(c.name.as_bytes()) {
+                return Ok(Some(FileId::Opaque(u64::from(c.fe_lba))));
+            }
+        }
+        Ok(None)
     }
 
     fn meta(&self, ino: FileId) -> VfsResult<FsMeta> {
-        let _ = ino;
-        todo!("RED: meta")
+        let fe_lba = fe_lba_of(ino)?;
+        let block_size = self.state.block_size;
+        let mut inner = self.lock();
+        let m = Self::resolve(&mut inner, fe_lba, block_size)?;
+        Ok(FsMeta {
+            ino: u64::from(fe_lba),
+            kind: if m.is_dir {
+                NodeKind::Dir
+            } else {
+                NodeKind::File
+            },
+            allocated: Allocation::Allocated,
+            size: m.size,
+            nlink: 1,
+            uid: None,
+            gid: None,
+            mode: None,
+            // The reader's public traversal API does not surface per-FE times;
+            // honestly absent, not epoch-0 (see the module note).
+            times: MacbTimes {
+                modified: None,
+                accessed: None,
+                changed: None,
+                born: None,
+            },
+            streams: Vec::new(),
+            residency: ResidencyKind::NonResident,
+            link_target: None,
+        })
     }
 
     fn read_at(&self, ino: FileId, stream: StreamId, off: u64, buf: &mut [u8]) -> VfsResult<usize> {
-        let _ = (ino, stream, off, buf);
-        todo!("RED: read_at")
+        let fe_lba = fe_lba_of(ino)?;
+        require_default_stream(stream)?;
+        let block_size = self.state.block_size;
+        let partition_start = self.state.partition_start;
+        let mut inner = self.lock();
+        // Confirm the node resolves (loud on an untraversed file / non-FE LBA).
+        Self::resolve(&mut inner, fe_lba, block_size)?;
+        let Some(data) = read_fe_data(&mut inner.reader, block_size, partition_start, fe_lba)
+        else {
+            return Ok(0);
+        };
+        let Ok(start) = usize::try_from(off) else {
+            return Ok(0);
+        };
+        if start >= data.len() {
+            return Ok(0);
+        }
+        let n = (data.len() - start).min(buf.len());
+        if let (Some(dst), Some(src)) = (buf.get_mut(..n), data.get(start..start + n)) {
+            dst.copy_from_slice(src);
+        }
+        Ok(n)
     }
 
-    fn read_link(&self, ino: FileId, cap: usize) -> VfsResult<Vec<u8>> {
-        let _ = (ino, cap);
-        todo!("RED: read_link")
+    fn read_link(&self, ino: FileId, _cap: usize) -> VfsResult<Vec<u8>> {
+        // UDF PATH_COMPONENT symlinks are not decoded; a node reads as an empty
+        // target (matching the iso9660/ext4/NTFS adapters), not a per-node error.
+        let _ = fe_lba_of(ino)?;
+        Ok(Vec::new())
     }
 
     fn deleted(&self) -> VfsResult<NodeStream> {
-        todo!("RED: deleted")
+        // Orphan/deleted File Entry recovery is not yet surfaced.
+        Ok(NodeStream::empty())
     }
 
     fn unallocated(&self) -> VfsResult<ExtentStream> {
-        todo!("RED: unallocated")
+        Ok(ExtentStream::empty())
     }
 }
 
@@ -196,10 +358,6 @@ mod tests {
     use super::*;
     use forensic_vfs::{Allocation, NodeKind, RunAlloc};
     use std::fs::File;
-
-    // Suppress unused warnings for helpers the stub impl never reaches.
-    #[allow(unused_imports)]
-    use super::{ByteRun, FeMeta, RunFlags, RunInfo};
 
     /// The committed real `mkudffs` fixture: a Type-1 physical partition with a
     /// 512-byte logical block. It is the only fixture whose partition kind the
