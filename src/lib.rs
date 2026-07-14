@@ -20,6 +20,10 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 pub mod findings;
 
+/// The forensic-vfs `FileSystem` adapter (behind the `vfs` feature).
+#[cfg(feature = "vfs")]
+pub mod vfs;
+
 /// The canonical 5-level severity scale, re-exported at the crate root for
 /// convenience (the analyzer grades every finding on it).
 pub use forensicnomicon::report::Severity;

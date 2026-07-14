@@ -18,10 +18,17 @@ exclude = ["tests/data/*.img"]
 
 [features]
 serde = ["dep:serde", "forensicnomicon/serde"]
+# Adapt `UdfState` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`) so a
+# UDF volume composes as `Arc<dyn FileSystem>` in the forensic-vfs engine.
+vfs = ["dep:forensic-vfs"]
 
 [dependencies]
 forensicnomicon = "1"
 serde = { version = "1", optional = true, features = ["derive"] }
+# forensic-vfs (KNOWLEDGE leaf) — the read-only FileSystem navigation contract.
+# Optional so a bare reader stays dependency-light; the `vfs` feature turns on
+# the adapter.
+forensic-vfs = { version = "0.1", optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"
