@@ -204,7 +204,7 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
 
 impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
     fn kind(&self) -> FsKind {
-        FsKind::Udf
+        FsKind::UDF
     }
 
     fn root(&self) -> FileId {
@@ -376,7 +376,7 @@ mod tests {
             eprintln!("skip: {PLAIN} fixture absent");
             return;
         };
-        assert_eq!(fs.kind(), FsKind::Udf);
+        assert_eq!(fs.kind(), FsKind::UDF);
         assert!(matches!(fs.root(), FileId::Opaque(_)));
         assert_eq!(fs.timestamp_zone(), TimeZonePolicy::Utc);
         let ss = fs.sector_sizes();
