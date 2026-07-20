@@ -38,7 +38,7 @@ use crate::{
     TAG_EFE, TAG_FE, TAG_FE_ALT, TAG_TERM,
 };
 
-/// The canonical 5-level severity scale, shared across every SecurityRonin
+/// The canonical 5-level severity scale, shared across every `SecurityRonin`
 /// analyzer via [`forensicnomicon::report`].
 pub use forensicnomicon::report::Severity;
 
@@ -593,27 +593,27 @@ mod tests {
         let part_start = 0u32;
 
         // AVDP @256 → VDS at LBA 260, length 4 blocks.
-        let a = 256 * BS;
-        img[a + 16..a + 20].copy_from_slice(&(4u32 * BS as u32).to_le_bytes()); // vds_len bytes
-        img[a + 20..a + 24].copy_from_slice(&260u32.to_le_bytes()); // vds_loc
+        let avdp = 256 * BS;
+        img[avdp + 16..avdp + 20].copy_from_slice(&(4u32 * BS as u32).to_le_bytes()); // vds_len bytes
+        img[avdp + 20..avdp + 24].copy_from_slice(&260u32.to_le_bytes()); // vds_loc
         stamp_tag(&mut img, 256, crate::TAG_AVDP, 16);
 
         // PD @260: partition number 0, starting location = part_start.
-        let p = 260 * BS;
-        img[p + 22..p + 24].copy_from_slice(&0u16.to_le_bytes());
-        img[p + 188..p + 192].copy_from_slice(&part_start.to_le_bytes());
+        let pd = 260 * BS;
+        img[pd + 22..pd + 24].copy_from_slice(&0u16.to_le_bytes());
+        img[pd + 188..pd + 192].copy_from_slice(&part_start.to_le_bytes());
         stamp_tag(&mut img, 260, crate::TAG_PD, 200);
 
         // LVD @261: FSD ICB long_ad @248 (lbn@252), partition ref 0; one Type-1
         // partition map (N_PM=1, map_table_len=6) at byte 440.
-        let l = 261 * BS;
-        img[l + 252..l + 256].copy_from_slice(&3u32.to_le_bytes()); // FSD logical block 3 → LBA 3
-        img[l + 256..l + 258].copy_from_slice(&0u16.to_le_bytes()); // partition reference
-        img[l + 264..l + 268].copy_from_slice(&6u32.to_le_bytes()); // map table length
-        img[l + 268..l + 272].copy_from_slice(&1u32.to_le_bytes()); // N_PM
-        img[l + 440] = 1; // map type 1
-        img[l + 441] = 6; // map length
-        img[l + 444..l + 446].copy_from_slice(&0u16.to_le_bytes()); // partition number
+        let lvd = 261 * BS;
+        img[lvd + 252..lvd + 256].copy_from_slice(&3u32.to_le_bytes()); // FSD logical block 3 → LBA 3
+        img[lvd + 256..lvd + 258].copy_from_slice(&0u16.to_le_bytes()); // partition reference
+        img[lvd + 264..lvd + 268].copy_from_slice(&6u32.to_le_bytes()); // map table length
+        img[lvd + 268..lvd + 272].copy_from_slice(&1u32.to_le_bytes()); // N_PM
+        img[lvd + 440] = 1; // map type 1
+        img[lvd + 441] = 6; // map length
+        img[lvd + 444..lvd + 446].copy_from_slice(&0u16.to_le_bytes()); // partition number
         stamp_tag(&mut img, 261, crate::TAG_LVD, 400);
 
         // LVID @262 — a descriptor the bootstrap walk recognises but does not
@@ -622,18 +622,18 @@ mod tests {
         stamp_tag(&mut img, 262, 9, 80);
 
         // FSD @3: recording time + Root Directory ICB (lbn@404) = logical 4.
-        let f = 3 * BS;
-        img[f + 16 + 2..f + 16 + 4].copy_from_slice(&2026i16.to_le_bytes()); // year
-        img[f + 16 + 4] = 6;
-        img[f + 16 + 5] = 21;
-        img[f + 404..f + 408].copy_from_slice(&4u32.to_le_bytes()); // root FE logical block 4
+        let fsd = 3 * BS;
+        img[fsd + 16 + 2..fsd + 16 + 4].copy_from_slice(&2026i16.to_le_bytes()); // year
+        img[fsd + 16 + 4] = 6;
+        img[fsd + 16 + 5] = 21;
+        img[fsd + 404..fsd + 408].copy_from_slice(&4u32.to_le_bytes()); // root FE logical block 4
         stamp_tag(&mut img, 3, crate::TAG_FSD, 400);
 
         // Root directory FE @4: inline FIDs → subdir (lbn 6) + file (lbn 7).
         let mut fids = vec![0u8; 160];
-        let n = write_fid(&mut fids, 0, 6, true, b"sub");
-        let _ = write_fid(&mut fids, n, 7, false, b"f.txt");
-        let total = n + ((16 + 2 + 1 + 1 + 16 + 2 + 5 + 3) & !3);
+        let fid_end = write_fid(&mut fids, 0, 6, true, b"sub");
+        let _ = write_fid(&mut fids, fid_end, 7, false, b"f.txt");
+        let total = fid_end + ((16 + 2 + 1 + 1 + 16 + 2 + 5 + 3) & !3);
         stamp_dir_fe(&mut img, 4, &fids[..total]);
 
         // Subdirectory FE @6: empty inline directory.

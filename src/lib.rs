@@ -241,7 +241,7 @@ fn classify_type2(map: &[u8]) -> UdfPartitionKind {
 
 /// Parse the partition maps from a Logical Volume Descriptor sector.
 ///
-/// LVD (ECMA-167 §10.6): N_PM at BP 268, Map Table Length at BP 264, maps at
+/// LVD (ECMA-167 §10.6): `N_PM` at BP 268, Map Table Length at BP 264, maps at
 /// BP 440.  Each map: `[type(1)][length(1)]…`; Type 1 carries the partition
 /// number at RBP 4; Type 2 is identified by its embedded entity string.
 fn parse_partition_maps(lvd: &[u8]) -> Vec<PartitionMap> {
@@ -298,7 +298,7 @@ pub fn read_fe_data<R: Read + Seek>(
 ) -> Option<Vec<u8>> {
     let mut sector = [0u8; MAX_BLOCK_SIZE];
     let sector = &mut sector[..block_size as usize];
-    seek_read(reader, fe_lba as u64 * block_size as u64, sector)?;
+    seek_read(reader, u64::from(fe_lba) * u64::from(block_size), sector)?;
 
     let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
     let is_efe = tag_ident == TAG_EFE;
@@ -362,7 +362,7 @@ fn detect_block_size<R: Read + Seek>(reader: &mut R) -> Result<Option<u32>, io::
     let mut last_eof: Option<io::Error> = None;
     let mut any_read_ok = false;
     for bs in BLOCK_SIZE_CANDIDATES {
-        match seek_read_checked(reader, 256 * bs as u64, &mut tag) {
+        match seek_read_checked(reader, 256 * u64::from(bs), &mut tag) {
             Ok(()) => {
                 any_read_ok = true;
                 let tag_ident = u16::from_le_bytes([tag[0], tag[1]]);
@@ -392,7 +392,7 @@ fn read_avdp_checked<R: Read + Seek>(
 ) -> Result<Option<(u32, u32)>, io::Error> {
     let mut sector = [0u8; MAX_BLOCK_SIZE];
     let sector = &mut sector[..block_size as usize];
-    seek_read_checked(reader, 256 * block_size as u64, sector)?;
+    seek_read_checked(reader, 256 * u64::from(block_size), sector)?;
     if u16::from_le_bytes([sector[0], sector[1]]) != TAG_AVDP {
         return Ok(None);
     }
@@ -425,7 +425,7 @@ fn read_vds_checked<R: Read + Seek>(
         let sector = &mut sector[..block_size as usize];
         seek_read_checked(
             reader,
-            (vds_loc as u64 + i as u64) * block_size as u64,
+            (u64::from(vds_loc) + i as u64) * u64::from(block_size),
             sector,
         )?;
         let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
@@ -488,7 +488,7 @@ fn read_fsd_checked<R: Read + Seek>(
 ) -> Result<Option<u32>, io::Error> {
     let mut sector = [0u8; MAX_BLOCK_SIZE];
     let sector = &mut sector[..block_size as usize];
-    seek_read_checked(reader, fsd_lba as u64 * block_size as u64, sector)?;
+    seek_read_checked(reader, u64::from(fsd_lba) * u64::from(block_size), sector)?;
     if u16::from_le_bytes([sector[0], sector[1]]) != TAG_FSD {
         return Ok(None);
     }
@@ -618,7 +618,7 @@ fn parse_fids<R: Read + Seek>(
 fn read_fe_info_len<R: Read + Seek>(reader: &mut R, block_size: u32, fe_lba: u32) -> Option<u64> {
     let mut sector = [0u8; MAX_BLOCK_SIZE];
     let sector = &mut sector[..block_size as usize];
-    seek_read(reader, fe_lba as u64 * block_size as u64, sector)?;
+    seek_read(reader, u64::from(fe_lba) * u64::from(block_size), sector)?;
     let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
     if tag_ident != TAG_FE && tag_ident != TAG_FE_ALT && tag_ident != TAG_EFE {
         return None;
@@ -641,7 +641,7 @@ pub(crate) fn read_fe_file_type<R: Read + Seek>(
 ) -> Option<u8> {
     let mut sector = [0u8; MAX_BLOCK_SIZE];
     let sector = &mut sector[..block_size as usize];
-    seek_read(reader, fe_lba as u64 * block_size as u64, sector)?;
+    seek_read(reader, u64::from(fe_lba) * u64::from(block_size), sector)?;
     let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
     if tag_ident != TAG_FE && tag_ident != TAG_FE_ALT && tag_ident != TAG_EFE {
         return None;
@@ -669,7 +669,7 @@ fn read_extents_short<R: Read + Seek>(
         let ext_type = len_raw >> 30;
         let ext_len = (len_raw & 0x3FFF_FFFF) as usize;
         if ext_type == (EXTENT_RECORDED >> 30) && ext_len > 0 {
-            let phys = (partition_start as u64 + ext_pos as u64) * block_size as u64;
+            let phys = (u64::from(partition_start) + u64::from(ext_pos)) * u64::from(block_size);
             read_extent(reader, block_size, phys, ext_len, total_len, &mut data)?;
         }
         pos += 8;
@@ -694,7 +694,7 @@ fn read_extents_long<R: Read + Seek>(
         let ext_type = len_raw >> 30;
         let ext_len = (len_raw & 0x3FFF_FFFF) as usize;
         if ext_type == (EXTENT_RECORDED >> 30) && ext_len > 0 {
-            let phys = (partition_start as u64 + lbn as u64) * block_size as u64;
+            let phys = (u64::from(partition_start) + u64::from(lbn)) * u64::from(block_size);
             read_extent(reader, block_size, phys, ext_len, total_len, &mut data)?;
         }
         pos += 16;
@@ -717,7 +717,7 @@ fn read_extent<R: Read + Seek>(
     for i in 0..sectors {
         let mut sector = [0u8; MAX_BLOCK_SIZE];
         let sector = &mut sector[..bs];
-        seek_read(reader, byte_pos + i as u64 * block_size as u64, sector)?;
+        seek_read(reader, byte_pos + i as u64 * u64::from(block_size), sector)?;
         let already = data.len() as u64;
         let remaining = total_len.saturating_sub(already) as usize;
         let sector_bytes = (ext_len - i * bs).min(bs);
@@ -735,16 +735,16 @@ fn decode_osta_cs0(bytes: &[u8]) -> String {
     }
     let comp_id = bytes[0];
     let payload = &bytes[1..];
-    match comp_id {
-        8 => String::from_utf8_lossy(payload).into_owned(),
-        16 => {
-            let pairs: Vec<u16> = payload
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                .collect();
-            String::from_utf16_lossy(&pairs)
-        }
-        _ => String::from_utf8_lossy(payload).into_owned(),
+    // 16 = UTF-16BE; compression ID 8 (UTF-8) and any other value decode as
+    // UTF-8 lossy (the OSTA CS0 default path).
+    if comp_id == 16 {
+        let pairs: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&pairs)
+    } else {
+        String::from_utf8_lossy(payload).into_owned()
     }
 }
 
