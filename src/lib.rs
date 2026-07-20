@@ -1479,6 +1479,7 @@ mod synth_traversal_tests {
         assert_eq!(decode_osta_cs0(&[16, 0x00, 0x41, 0x00, 0x42]), "AB");
     }
 
+    #[cfg(feature = "vfs")]
     #[test]
     fn read_fe_file_type_classifies_and_rejects() {
         let mut r = Cursor::new(ts::image());
