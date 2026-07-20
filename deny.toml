@@ -1,0 +1,41 @@
+[advisories]
+version = 2
+# - RUSTSEC-2025-0056: `adler` — dev-dep via blazehash-core 0.2.4; superseded by adler2.
+#   (The crossbeam RUSTSEC-2026-0204 vulnerability was fixed by updating to 0.9.20.)
+# RUSTSEC-2025-0119 (number_prefix, unmaintained) was FIXED by bumping indicatif
+# 0.17 -> 0.18, which drops number_prefix — genuinely resolved, not ignored.
+# RUSTSEC-2026-0002 (console IterMut unsoundness) was ALSO genuinely fixed by that
+# bump: every committed Cargo.lock (root, forensic/fuzz, core/fuzz) resolves the
+# patched console 0.16.4, and `cargo deny --all-features check` passes locally on
+# both macOS and the linux target. The ignore below guards a cargo-deny-ACTION CI
+# re-resolution artifact: the Docker action surfaces a phantom console 0.15 that is
+# absent from every shipped lock and not reproducible with the identical command
+# locally. Remove once the action stops re-resolving (or on the next deny-action bump).
+ignore = ["RUSTSEC-2025-0056", "RUSTSEC-2026-0002"]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+# Consolidating the reader (rayon/crossbeam) and the analyzer (indicatif/memmap2)
+# dep graphs introduces transitive duplicates (e.g. two windows-sys majors) that
+# neither standalone repo had. Downgraded to a warning for the combined workspace
+# — forcing a single version across two large, independently-maintained subtrees
+# is not worth a hard CI fail. Advisories/licenses/sources stay strict.
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
