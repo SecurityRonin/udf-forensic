@@ -24,6 +24,11 @@ vfs = ["dep:forensic-vfs"]
 
 [dependencies]
 forensicnomicon = "1"
+# The fleet's single audited bounds-checked integer reader (no_std, forbid(unsafe),
+# fuzzed): fixed-width reads return 0 out of range instead of panicking. This
+# untrusted-input parser routes every fixed-width read through it rather than
+# re-deriving a per-crate bytes.rs.
+safe-read = "0.1"
 serde = { version = "1", optional = true, features = ["derive"] }
 # forensic-vfs (KNOWLEDGE leaf) — the read-only FileSystem navigation contract.
 # Optional so a bare reader stays dependency-light; the `vfs` feature turns on
@@ -32,3 +37,14 @@ forensic-vfs = { version = "0.7", optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[lints.clippy]
+# Base correctness tiers plus the panic-free enforcement denies. This parser
+# reads untrusted, attacker-controllable UDF images, so an unwrap/expect in
+# production is a denial-of-service panic vector. (clippy::pedantic is deferred
+# to a separate style pass — this change is the panic-free security gate.)
+all         = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious  = { level = "deny", priority = -1 }
+unwrap_used = { level = "deny", priority = 0 }
+expect_used = { level = "deny", priority = 0 }

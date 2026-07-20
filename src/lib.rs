@@ -16,6 +16,11 @@
 //!
 //! All physical LBAs satisfy: `phys_lba = partition_start + logical_block_num`.
 
+// Tests deliberately unwrap/expect on known-good fixtures; the panic-free denies
+// apply only to production code that parses untrusted images.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+use safe_read::{le_u32, le_u64};
 use std::io::{self, Read, Seek, SeekFrom};
 
 pub mod findings;
@@ -240,8 +245,8 @@ fn classify_type2(map: &[u8]) -> UdfPartitionKind {
 /// BP 440.  Each map: `[type(1)][length(1)]…`; Type 1 carries the partition
 /// number at RBP 4; Type 2 is identified by its embedded entity string.
 fn parse_partition_maps(lvd: &[u8]) -> Vec<PartitionMap> {
-    let n_pm = u32::from_le_bytes(lvd[268..272].try_into().unwrap()) as usize;
-    let mt_l = u32::from_le_bytes(lvd[264..268].try_into().unwrap()) as usize;
+    let n_pm = le_u32(lvd, 268) as usize;
+    let mt_l = le_u32(lvd, 264) as usize;
     let maps_end = (440 + mt_l).min(lvd.len());
     let mut out = Vec::new();
     let mut off = 440;
@@ -303,7 +308,7 @@ pub fn read_fe_data<R: Read + Seek>(
 
     let icb_flags = u16::from_le_bytes([sector[34], sector[35]]);
     let alloc_type = icb_flags & 0x0007;
-    let info_len = u64::from_le_bytes(sector[56..64].try_into().unwrap());
+    let info_len = le_u64(sector, 56);
 
     // Base File Entry (ECMA-167 4/14.9): L_EA @168, L_AD @172, area @176.
     // Extended File Entry (4/14.17) inserts ObjectSize(8), CreationTime(12),
@@ -321,8 +326,8 @@ pub fn read_fe_data<R: Read + Seek>(
     if ad_off + 4 > sector.len() {
         return None;
     }
-    let ea_len = u32::from_le_bytes(sector[ea_off..ea_off + 4].try_into().unwrap()) as usize;
-    let ad_len = u32::from_le_bytes(sector[ad_off..ad_off + 4].try_into().unwrap()) as usize;
+    let ea_len = le_u32(sector, ea_off) as usize;
+    let ad_len = le_u32(sector, ad_off) as usize;
 
     let ad_start = header + ea_len;
     let ad_end = ad_start + ad_len;
@@ -361,7 +366,7 @@ fn detect_block_size<R: Read + Seek>(reader: &mut R) -> Result<Option<u32>, io::
             Ok(()) => {
                 any_read_ok = true;
                 let tag_ident = u16::from_le_bytes([tag[0], tag[1]]);
-                let tag_location = u32::from_le_bytes(tag[12..16].try_into().unwrap());
+                let tag_location = le_u32(&tag, 12);
                 if tag_ident == TAG_AVDP && tag_location == 256 {
                     return Ok(Some(bs));
                 }
@@ -391,8 +396,8 @@ fn read_avdp_checked<R: Read + Seek>(
     if u16::from_le_bytes([sector[0], sector[1]]) != TAG_AVDP {
         return Ok(None);
     }
-    let vds_len = u32::from_le_bytes(sector[16..20].try_into().unwrap());
-    let vds_loc = u32::from_le_bytes(sector[20..24].try_into().unwrap());
+    let vds_len = le_u32(sector, 16);
+    let vds_loc = le_u32(sector, 20);
     Ok(Some((vds_loc, vds_len)))
 }
 
@@ -427,13 +432,13 @@ fn read_vds_checked<R: Read + Seek>(
         match tag_ident {
             TAG_PD => {
                 let part_num = u16::from_le_bytes([sector[22], sector[23]]);
-                let psl = u32::from_le_bytes(sector[188..192].try_into().unwrap());
+                let psl = le_u32(sector, 188);
                 pd_start.insert(part_num, psl);
             }
             TAG_LVD => {
                 // LV Contents Use long_ad at offset 248: extent_length [248..252],
                 // logical_block_num [252..256], partition_reference [256..258].
-                fsd_lbn = Some(u32::from_le_bytes(sector[252..256].try_into().unwrap()));
+                fsd_lbn = Some(le_u32(sector, 252));
                 fsd_part_ref = u16::from_le_bytes([sector[256], sector[257]]);
                 maps = parse_partition_maps(sector);
             }
@@ -493,7 +498,7 @@ fn read_fsd_checked<R: Read + Seek>(
     //   FS Identifier(32) + Copyright FI(32) + Abstract FI(32) = 408 bytes.
     // Root Directory ICB (long_ad) starts at offset 400:
     //   extent_length [400..404], logical_block_num [404..408]
-    let lbn = u32::from_le_bytes(sector[404..408].try_into().unwrap());
+    let lbn = le_u32(sector, 404);
     Ok(Some(partition_start + lbn))
 }
 
@@ -509,13 +514,16 @@ fn detect_fid_tag_size(data: &[u8]) -> usize {
     while off + 28 <= data.len() {
         let ti = u16::from_le_bytes([data[off], data[off + 1]]);
         if ti == TAG_FID {
+            // Keep the length guards: the "too short" fallback is `u32::MAX`
+            // (which fails the `< 0x10000` plausibility test), NOT 0 — a bare
+            // 0-returning read would wrongly make a truncated tail look valid.
             let lbn16 = if off + 26 <= data.len() {
-                u32::from_le_bytes(data[off + 22..off + 26].try_into().unwrap())
+                le_u32(data, off + 22)
             } else {
                 u32::MAX
             };
             let lbn18 = if off + 28 <= data.len() {
-                u32::from_le_bytes(data[off + 24..off + 28].try_into().unwrap())
+                le_u32(data, off + 24)
             } else {
                 u32::MAX
             };
@@ -566,11 +574,7 @@ fn parse_fids<R: Read + Seek>(
         let file_id_len = data[off + tag_size + 1] as usize;
         // ICB long_ad: extent_length at body[2..6], lbn at body[6..10]
         let icb_lbn = if off + tag_size + 10 <= data.len() {
-            u32::from_le_bytes(
-                data[off + tag_size + 6..off + tag_size + 10]
-                    .try_into()
-                    .unwrap(),
-            )
+            le_u32(data, off + tag_size + 6)
         } else {
             off += fid_advance.max(4);
             continue;
@@ -619,7 +623,7 @@ fn read_fe_info_len<R: Read + Seek>(reader: &mut R, block_size: u32, fe_lba: u32
     if tag_ident != TAG_FE && tag_ident != TAG_FE_ALT && tag_ident != TAG_EFE {
         return None;
     }
-    Some(u64::from_le_bytes(sector[56..64].try_into().unwrap()))
+    Some(le_u64(sector, 56))
 }
 
 /// Read the ICB Tag File Type of the File Entry at `fe_lba` (ECMA-167 4/14.6.6):
@@ -660,8 +664,8 @@ fn read_extents_short<R: Read + Seek>(
     let mut data = Vec::new();
     let mut pos = 0;
     while pos + 8 <= ad_area.len() && (data.len() as u64) < total_len {
-        let len_raw = u32::from_le_bytes(ad_area[pos..pos + 4].try_into().unwrap());
-        let ext_pos = u32::from_le_bytes(ad_area[pos + 4..pos + 8].try_into().unwrap());
+        let len_raw = le_u32(ad_area, pos);
+        let ext_pos = le_u32(ad_area, pos + 4);
         let ext_type = len_raw >> 30;
         let ext_len = (len_raw & 0x3FFF_FFFF) as usize;
         if ext_type == (EXTENT_RECORDED >> 30) && ext_len > 0 {
@@ -685,8 +689,8 @@ fn read_extents_long<R: Read + Seek>(
     let mut data = Vec::new();
     let mut pos = 0;
     while pos + 16 <= ad_area.len() && (data.len() as u64) < total_len {
-        let len_raw = u32::from_le_bytes(ad_area[pos..pos + 4].try_into().unwrap());
-        let lbn = u32::from_le_bytes(ad_area[pos + 4..pos + 8].try_into().unwrap());
+        let len_raw = le_u32(ad_area, pos);
+        let lbn = le_u32(ad_area, pos + 4);
         let ext_type = len_raw >> 30;
         let ext_len = (len_raw & 0x3FFF_FFFF) as usize;
         if ext_type == (EXTENT_RECORDED >> 30) && ext_len > 0 {
@@ -952,11 +956,11 @@ fn fe_last_block_pos<R: Read + Seek>(
     let mut last: Option<u64> = None;
     let mut pos = 0;
     while pos + stride <= ad_area.len() {
-        let len_raw = read_le_u32(ad_area, pos);
+        let len_raw = le_u32(ad_area, pos);
         let ext_type = len_raw >> 30;
         let ext_len = (len_raw & 0x3FFF_FFFF) as usize;
         if ext_type == (EXTENT_RECORDED >> 30) && ext_len > 0 {
-            let lbn = read_le_u32(ad_area, pos + 4);
+            let lbn = le_u32(ad_area, pos + 4);
             let blocks_in_ext = ext_len.div_ceil(block_size as usize) as u64;
             let last_lbn = u64::from(partition_start) + u64::from(lbn) + (blocks_in_ext - 1);
             last = Some(last_lbn * u64::from(block_size));
@@ -964,16 +968,6 @@ fn fe_last_block_pos<R: Read + Seek>(
         pos += stride;
     }
     last
-}
-
-/// Read a little-endian `u32` at `off`, returning 0 if out of range (the caller
-/// has already bounds-checked the slice length, so the fallback is defensive).
-fn read_le_u32(data: &[u8], off: usize) -> u32 {
-    let mut b = [0u8; 4];
-    if let Some(s) = data.get(off..off + 4) {
-        b.copy_from_slice(s);
-    }
-    u32::from_le_bytes(b)
 }
 
 #[cfg(test)]

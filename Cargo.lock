@@ -62,6 +62,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "safe-read"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4487a19fd870fa418cd95a218049eeb70514535bf2271715774d97d7caab1ce5"
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -134,6 +140,7 @@ version = "0.2.3"
 dependencies = [
  "forensic-vfs",
  "forensicnomicon",
+ "safe-read",
  "serde",
 ]
 
