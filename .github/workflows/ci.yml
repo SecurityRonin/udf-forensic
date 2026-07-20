@@ -43,7 +43,7 @@ jobs:
       - run: cargo test
 
   coverage:
-    name: Coverage (>=83% lines)
+    name: Coverage (>=96% lines)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -59,11 +59,14 @@ jobs:
       # not functions: llvm-cov emits an always-zero `<_>` template region for
       # every generic reader fn (`fn foo<R: Read + Seek>`), so 100% *function*
       # coverage is structurally unreachable here. The committed mkudffs images
-      # (tests/data/*.img) drive the happy path; the residual uncovered lines are
-      # the Type-2 partition-resolution and vfs-adapter branches no committed
-      # fixture reaches. 83% lines is the honestly-achieved gate (ratcheted to the
-      # current level, no slack) — raise it as fixtures grow, never fake 100%.
-      - run: cargo llvm-cov --workspace --all-features --fail-under-lines 83 --show-missing-lines
+      # (tests/data/*.img) plus the hand-built synthetic UDF fixture
+      # (src/test_support.rs) drive directory traversal, filename decoding, the
+      # short/long extent readers, and the vfs adapter; the residual uncovered
+      # lines are `// cov:unreachable` defensive guards and the fixture-absent
+      # skip arms in the real-media tests. 96% lines is the honestly-achieved gate
+      # (ratcheted to the current level, no slack) — raise it as fixtures grow,
+      # never fake 100%.
+      - run: cargo llvm-cov --workspace --all-features --fail-under-lines 96 --show-missing-lines
 
   msrv:
     name: MSRV (1.85)

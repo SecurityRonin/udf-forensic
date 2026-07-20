@@ -324,7 +324,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
             return Ok(0);
         };
         let Ok(start) = usize::try_from(off) else {
-            return Ok(0);
+            return Ok(0); // cov:unreachable: off: u64 always fits usize on 64-bit targets (guard for 32-bit)
         };
         if start >= data.len() {
             return Ok(0);
@@ -519,5 +519,128 @@ mod tests {
         assert!(super::fe_lba_of(FileId::Opaque(42)).is_ok());
         assert!(super::fe_lba_of(FileId::Opaque(u64::from(u32::MAX) + 1)).is_err());
         assert!(super::fe_lba_of(FileId::NtfsRef { entry: 1, seq: 1 }).is_err());
+    }
+
+    // ── Over the populated synthetic image (test_support) ─────────────────────
+    //
+    // The committed `mkudffs` plain image has an empty root, so the child-caching,
+    // lookup-hit, non-empty-extent, uncached-file-resolve, and non-directory
+    // error paths are only reachable over a directory that actually holds files.
+
+    use crate::test_support as ts;
+    use std::io::Cursor;
+
+    fn open_rich() -> UdfVfs<Cursor<Vec<u8>>> {
+        UdfVfs::open(Cursor::new(ts::image())).expect("rich synthetic UDF opens")
+    }
+
+    #[test]
+    fn rich_lists_and_looks_up_children() {
+        let fs = open_rich();
+        let root = fs.root();
+        let names: Vec<String> = fs
+            .read_dir(root)
+            .expect("read_dir")
+            .map(|e| String::from_utf8_lossy(&e.expect("entry").name).into_owned())
+            .collect();
+        assert!(names.iter().any(|n| n == "inline.txt"), "names: {names:?}");
+        assert!(names.iter().any(|n| n == "sub"), "names: {names:?}");
+        // lookup is case-insensitive and resolves to an Opaque node id.
+        let id = fs
+            .lookup(root, b"INLINE.TXT")
+            .expect("lookup")
+            .expect("inline.txt found");
+        assert!(matches!(id, FileId::Opaque(_)));
+        assert!(fs.lookup(root, b"NOPE").expect("lookup").is_none());
+    }
+
+    #[test]
+    fn meta_and_extents_on_uncached_file() {
+        let fs = open_rich();
+        // Stat a file FE that read_dir has not cached — resolve reads it and
+        // classifies it from the ICB Tag File Type.
+        let file = FileId::Opaque(u64::from(ts::INLINE_FILE_FE));
+        let m = fs.meta(file).expect("uncached file meta");
+        assert_eq!(m.kind, NodeKind::File);
+        assert_eq!(m.size, 4);
+        let runs: Vec<_> = fs
+            .extents(file, StreamId::Default)
+            .expect("extents")
+            .map(|r| r.expect("run"))
+            .collect();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run.len, 4);
+        assert_eq!(runs[0].alloc, RunAlloc::Allocated);
+    }
+
+    #[test]
+    fn read_at_returns_file_bytes_across_extents() {
+        let fs = open_rich();
+        let inline = FileId::Opaque(u64::from(ts::INLINE_FILE_FE));
+        let mut buf = [0u8; 8];
+        let n = fs
+            .read_at(inline, StreamId::Default, 0, &mut buf)
+            .expect("read inline");
+        assert_eq!(&buf[..n], b"abcd");
+
+        // The short-extent file reads its full length across two blocks.
+        let short = FileId::Opaque(u64::from(ts::SHORT_FILE_FE));
+        let mut big = vec![0u8; ts::SHORT_FILE_LEN as usize];
+        let got = fs
+            .read_at(short, StreamId::Default, 0, &mut big)
+            .expect("read short");
+        assert_eq!(got as u64, ts::SHORT_FILE_LEN);
+        assert_eq!(big[0], 0x41);
+        assert_eq!(big[599], 0x42);
+    }
+
+    #[test]
+    fn read_dir_and_read_at_on_broken_dir_are_honest() {
+        let fs = open_rich();
+        // Populate the cache (marks the broken-dir FE as a directory).
+        let _ = fs.read_dir(fs.root()).expect("read root").count();
+        // A file FE is not a directory → loud error.
+        assert!(fs
+            .read_dir(FileId::Opaque(u64::from(ts::INLINE_FILE_FE)))
+            .is_err());
+        // A directory FE whose data cannot be read fails loud, not empty.
+        assert!(fs
+            .read_dir(FileId::Opaque(u64::from(ts::BROKEN_DIR_FE)))
+            .is_err());
+        // read_at on that unreadable directory yields 0 bytes (no data present).
+        assert_eq!(
+            fs.read_at(
+                FileId::Opaque(u64::from(ts::BROKEN_DIR_FE)),
+                StreamId::Default,
+                0,
+                &mut [0u8; 4],
+            )
+            .expect("read broken dir"),
+            0
+        );
+    }
+
+    #[test]
+    fn open_surfaces_io_and_bootstrap_failures() {
+        use std::io::{self, Read, Seek, SeekFrom};
+        struct Faulty;
+        impl Read for Faulty {
+            fn read(&mut self, _b: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("device read fault"))
+            }
+        }
+        impl Seek for Faulty {
+            fn seek(&mut self, _p: SeekFrom) -> io::Result<u64> {
+                Ok(0)
+            }
+        }
+        // A read fault during bootstrap is a loud Io error, not a silent mount.
+        assert!(matches!(UdfVfs::open(Faulty), Err(VfsError::Io { .. })));
+        // A readable but non-UDF source is a loud Bootstrap error.
+        let non_udf = Cursor::new(vec![0u8; 257 * 2048]);
+        assert!(matches!(
+            UdfVfs::open(non_udf),
+            Err(VfsError::Bootstrap { .. })
+        ));
     }
 }

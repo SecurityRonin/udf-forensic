@@ -710,4 +710,73 @@ mod tests {
         let a = analyze(&mut r).expect("cyclic UDF still terminates");
         assert!(a.is_empty(), "cycle must be skipped cleanly, got: {a:?}");
     }
+
+    #[test]
+    fn tag_crc_and_checksum_anomaly_surface() {
+        // The CRC/checksum variants: severity/category/code/note are all derived
+        // from the kind (the corpus is clean, so these are exercised here).
+        let crc = UdfAnomaly::new(UdfAnomalyKind::TagCrcMismatch {
+            descriptor: "AVDP".into(),
+            lba: 256,
+            stored: 0x1234,
+            computed: 0x5678,
+        });
+        assert_eq!(crc.code, "UDF-TAG-CRC-MISMATCH");
+        assert_eq!(crc.severity, Severity::High);
+        assert_eq!(crc.kind.category(), Category::Integrity);
+        assert!(crc.note.contains("consistent with"));
+
+        let ck = UdfAnomaly::new(UdfAnomalyKind::TagChecksumBad {
+            descriptor: "FSD".into(),
+            lba: 3,
+            stored: 1,
+            computed: 2,
+        });
+        assert_eq!(ck.code, "UDF-TAG-CHECKSUM-BAD");
+        assert_eq!(ck.severity, Severity::High);
+        assert_eq!(ck.kind.category(), Category::Integrity);
+        assert!(ck.note.contains("consistent with"));
+    }
+
+    #[test]
+    fn analyze_non_udf_source_is_empty() {
+        // Readable, but no AVDP → nothing to audit (Ok(empty)), never an error.
+        let mut r = Cursor::new(vec![0u8; 257 * 2048]);
+        assert!(analyze(&mut r).unwrap().is_empty());
+    }
+
+    #[test]
+    fn analyze_flags_descriptor_crc_mismatch() {
+        // Corrupt a reserved AVDP body byte AFTER stamping so the recorded
+        // DescriptorCRC no longer matches the recomputed one (the structure still
+        // parses; only the CRC check trips).
+        let mut img = minimal_udf();
+        img[256 * BS + 30] ^= 0xFF;
+        let mut r = Cursor::new(img);
+        let a = analyze(&mut r).unwrap();
+        assert!(
+            a.iter().any(|x| x.code == "UDF-TAG-CRC-MISMATCH"),
+            "expected a CRC mismatch, got: {a:?}"
+        );
+    }
+
+    #[test]
+    fn analyze_flags_file_after_volume() {
+        // Give the file FE (LBA 7) a modification time far after the FSD
+        // recording time, then re-stamp its tag so only the time anomaly trips.
+        let mut img = minimal_udf();
+        let ff = 7 * BS;
+        img[ff + 84 + 2..ff + 84 + 4].copy_from_slice(&2099i16.to_le_bytes());
+        img[ff + 84 + 4] = 1; // month
+        img[ff + 84 + 5] = 1; // day
+        stamp_tag(&mut img, 7, crate::TAG_FE, 200);
+        let mut r = Cursor::new(img);
+        let a = analyze(&mut r).unwrap();
+        let taf: Vec<_> = a
+            .iter()
+            .filter(|x| x.code == "UDF-TIME-AFTER-VOLUME")
+            .collect();
+        assert_eq!(taf.len(), 1, "one file-after-volume, got: {a:?}");
+        assert_eq!(taf[0].severity, Severity::Medium);
+    }
 }

@@ -29,6 +29,9 @@ pub mod findings;
 #[cfg(feature = "vfs")]
 pub mod vfs;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 /// The canonical 5-level severity scale, re-exported at the crate root for
 /// convenience (the analyzer grades every finding on it).
 pub use forensicnomicon::report::Severity;
@@ -188,7 +191,7 @@ pub fn parse_udf_state_checked<R: Read + Seek>(
         return Ok(None);
     };
     let Some((vds_loc, vds_len)) = read_avdp_checked(reader, block_size)? else {
-        return Ok(None);
+        return Ok(None); // cov:unreachable: detect_block_size already validated the AVDP tag at LBA 256
     };
     let Some(vds) = read_vds_checked(reader, block_size, vds_loc, vds_len)? else {
         return Ok(None);
@@ -324,7 +327,7 @@ pub fn read_fe_data<R: Read + Seek>(
     };
 
     if ad_off + 4 > sector.len() {
-        return None;
+        return None; // cov:unreachable: ea/ad offsets (<=216) fit any supported block (>=512)
     }
     let ea_len = le_u32(sector, ea_off) as usize;
     let ad_len = le_u32(sector, ad_off) as usize;
@@ -576,12 +579,14 @@ fn parse_fids<R: Read + Seek>(
         let icb_lbn = if off + tag_size + 10 <= data.len() {
             le_u32(data, off + tag_size + 6)
         } else {
+            // cov:unreachable: loop guard `off + min_fid <= len` with min_fid = tag_size + 20
             off += fid_advance.max(4);
             continue;
         };
         let impl_use_len = if off + tag_size + 20 <= data.len() {
             u16::from_le_bytes([data[off + tag_size + 18], data[off + tag_size + 19]]) as usize
         } else {
+            // cov:unreachable: loop guard `off + min_fid <= len` with min_fid = tag_size + 20
             off += fid_advance.max(4);
             continue;
         };
@@ -1361,5 +1366,237 @@ mod findings_support_tests {
         img[fe_off + 34..fe_off + 36].copy_from_slice(&3u16.to_le_bytes());
         let mut r = Cursor::new(img);
         assert_eq!(fe_slack_nonzero(&mut r, 512, ps, fe), None);
+    }
+}
+
+#[cfg(test)]
+mod synth_traversal_tests {
+    //! Directory (FID) traversal, filename decoding, and the short/long
+    //! allocation extent readers, driven over the hand-built populated UDF image
+    //! in `test_support` (the committed `mkudffs` corpus has empty roots and
+    //! inline-only data, so it cannot reach these paths). Expected values are
+    //! derived from the documented ECMA-167 construction of the fixture.
+    use super::*;
+    use crate::test_support as ts;
+    use std::io::Cursor;
+
+    #[test]
+    fn read_dir_lists_children_with_decoded_names_and_sizes() {
+        let mut r = Cursor::new(ts::image());
+        let st = parse_udf_state(&mut r).expect("synthetic UDF parses");
+        assert_eq!(st.block_size, 512);
+        assert_eq!(st.partition_kind, UdfPartitionKind::Physical);
+
+        let entries = read_dir_at_lba(&mut r, st.block_size, st.partition_start, st.root_fe_lba)
+            .expect("root directory reads");
+        // The parent FID is skipped; the six real children are surfaced.
+        assert_eq!(entries.len(), 6, "entries: {entries:?}");
+        let by_name = |n: &str| entries.iter().find(|e| e.name == n);
+
+        assert!(by_name("sub").expect("sub").is_dir);
+        assert!(by_name("bd").expect("bd").is_dir);
+        let inline = by_name("inline.txt").expect("inline.txt");
+        assert!(!inline.is_dir);
+        assert_eq!(inline.size, 4);
+        assert_eq!(
+            by_name("short.bin").expect("short.bin").size,
+            ts::SHORT_FILE_LEN
+        );
+        assert_eq!(
+            by_name("long.bin").expect("long.bin").size,
+            ts::LONG_FILE_LEN
+        );
+        // OSTA CS0 compression id 16 (UTF-16BE) decodes to "U".
+        assert!(by_name("U").is_some(), "utf-16 name decoded: {entries:?}");
+    }
+
+    #[test]
+    fn read_fe_data_reads_short_extents() {
+        let mut r = Cursor::new(ts::image());
+        let st = parse_udf_state(&mut r).unwrap();
+        let data = read_fe_data(&mut r, st.block_size, st.partition_start, ts::SHORT_FILE_FE)
+            .expect("short-extent file data");
+        assert_eq!(data.len() as u64, ts::SHORT_FILE_LEN);
+        assert!(data[..512].iter().all(|&b| b == 0x41));
+        assert!(data[512..].iter().all(|&b| b == 0x42));
+    }
+
+    #[test]
+    fn read_fe_data_reads_long_extents() {
+        let mut r = Cursor::new(ts::image());
+        let st = parse_udf_state(&mut r).unwrap();
+        let data = read_fe_data(&mut r, st.block_size, st.partition_start, ts::LONG_FILE_FE)
+            .expect("long-extent file data");
+        assert_eq!(data.len() as u64, ts::LONG_FILE_LEN);
+        assert!(data.iter().all(|&b| b == 0x43));
+    }
+
+    #[test]
+    fn read_fe_data_reads_inline() {
+        let mut r = Cursor::new(ts::image());
+        let st = parse_udf_state(&mut r).unwrap();
+        let data = read_fe_data(
+            &mut r,
+            st.block_size,
+            st.partition_start,
+            ts::INLINE_FILE_FE,
+        )
+        .expect("inline file data");
+        assert_eq!(data, b"abcd");
+    }
+
+    #[test]
+    fn read_fe_data_none_for_non_file_entry() {
+        let mut r = Cursor::new(vec![0u8; 4096]);
+        assert!(read_fe_data(&mut r, 512, 0, 0).is_none());
+    }
+
+    #[test]
+    fn read_fe_data_none_for_broken_directory() {
+        // L_AD overruns the block, so the allocation area cannot be sliced.
+        let mut r = Cursor::new(ts::image());
+        let st = parse_udf_state(&mut r).unwrap();
+        assert!(
+            read_fe_data(&mut r, st.block_size, st.partition_start, ts::BROKEN_DIR_FE).is_none()
+        );
+    }
+
+    #[test]
+    fn read_fe_data_none_for_unsupported_alloc_type() {
+        // Allocation type 2 (extended alloc descriptors) is not resolved here.
+        let mut img = vec![0u8; 1024];
+        img[0..2].copy_from_slice(&TAG_FE.to_le_bytes());
+        img[34..36].copy_from_slice(&2u16.to_le_bytes()); // alloc type 2
+        let mut r = Cursor::new(img);
+        assert!(read_fe_data(&mut r, 512, 0, 0).is_none());
+    }
+
+    #[test]
+    fn decode_osta_cs0_utf8_utf16_and_empty() {
+        assert_eq!(decode_osta_cs0(&[]), "");
+        assert_eq!(decode_osta_cs0(b"\x08hello"), "hello");
+        // Compression id 16 = UTF-16BE.
+        assert_eq!(decode_osta_cs0(&[16, 0x00, 0x41, 0x00, 0x42]), "AB");
+    }
+
+    #[test]
+    fn read_fe_file_type_classifies_and_rejects() {
+        let mut r = Cursor::new(ts::image());
+        let st = parse_udf_state(&mut r).unwrap();
+        assert_eq!(
+            read_fe_file_type(&mut r, st.block_size, ts::SUBDIR_FE),
+            Some(FILE_TYPE_DIRECTORY)
+        );
+        assert_eq!(
+            read_fe_file_type(&mut r, st.block_size, ts::INLINE_FILE_FE),
+            Some(5)
+        );
+        let mut z = Cursor::new(vec![0u8; 4096]);
+        assert_eq!(read_fe_file_type(&mut z, 512, 0), None);
+    }
+
+    #[test]
+    fn parse_fids_skips_padding_and_stops_on_overflow() {
+        // All-zero directory data: every 4-byte step sees a non-FID tag.
+        let mut r = Cursor::new(vec![0u8; 64]);
+        assert!(parse_fids(&mut r, 512, 0, &[0u8; 64]).is_empty());
+        // A FID whose DescriptorCRCLength drives fid_advance past the buffer end
+        // must break the loop rather than read out of bounds.
+        let mut data = vec![0u8; 40];
+        data[0..2].copy_from_slice(&TAG_FID.to_le_bytes());
+        data[10..12].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        assert!(parse_fids(&mut r, 512, 0, &data).is_empty());
+    }
+
+    #[test]
+    fn parse_state_none_when_vds_has_no_lvd() {
+        // Valid AVDP + detectable block size, but the VDS carries no Logical
+        // Volume Descriptor → a structural "not UDF" (Ok(None)), never an error.
+        let mut img = vec![0u8; 512 * 264];
+        let avdp = 256 * 512;
+        img[avdp..avdp + 2].copy_from_slice(&2u16.to_le_bytes()); // TAG_AVDP
+        img[avdp + 12..avdp + 16].copy_from_slice(&256u32.to_le_bytes()); // tag location
+        img[avdp + 16..avdp + 20].copy_from_slice(&512u32.to_le_bytes()); // VDS length: 1 block
+        img[avdp + 20..avdp + 24].copy_from_slice(&260u32.to_le_bytes()); // VDS location
+                                                                          // LBA 260 left zero → no PD/LVD.
+        let mut r = Cursor::new(img);
+        assert!(parse_udf_state_checked(&mut r).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_state_none_when_fsd_tag_wrong() {
+        // Valid AVDP + VDS(PD+LVD) but the FSD sector is not an FSD → Ok(None).
+        let mut img = ts::image();
+        img[3 * 512..3 * 512 + 2].copy_from_slice(&0u16.to_le_bytes());
+        let mut r = Cursor::new(img);
+        assert!(parse_udf_state_checked(&mut r).unwrap().is_none());
+    }
+
+    #[test]
+    fn descriptor_label_terminating() {
+        assert_eq!(descriptor_label(TAG_TERM), Some("TerminatingDescriptor"));
+    }
+
+    #[test]
+    fn detect_udf_recognises_nsr_and_stops_on_terminator() {
+        // NSR03 in the volume recognition sequence (LBA 16) → recognised.
+        let mut img = vec![0u8; 20 * 2048];
+        img[16 * 2048 + 1..16 * 2048 + 6].copy_from_slice(b"NSR03");
+        assert!(detect_udf(&mut Cursor::new(img)));
+        // A TEA01 terminator with no NSR → not UDF (the scan stops at TEA01).
+        let mut tea = vec![0u8; 20 * 2048];
+        tea[16 * 2048 + 1..16 * 2048 + 6].copy_from_slice(b"TEA01");
+        assert!(!detect_udf(&mut Cursor::new(tea)));
+        // A source too short to reach LBA 16 breaks out and reports false.
+        assert!(!detect_udf(&mut Cursor::new(vec![0u8; 100])));
+    }
+
+    #[test]
+    fn classify_type2_maps_entity_strings() {
+        assert_eq!(
+            classify_type2(b"....*UDF Metadata Partition...."),
+            UdfPartitionKind::Metadata
+        );
+        assert_eq!(
+            classify_type2(b"....*UDF Virtual Partition...."),
+            UdfPartitionKind::Virtual
+        );
+        assert_eq!(
+            classify_type2(b"....*UDF Sparable Partition...."),
+            UdfPartitionKind::Sparable
+        );
+        assert_eq!(
+            classify_type2(b"no entity string"),
+            UdfPartitionKind::Unknown
+        );
+    }
+
+    #[test]
+    fn parse_partition_maps_type1_type2_and_unknown() {
+        let mut lvd = vec![0u8; 512];
+        lvd[268..272].copy_from_slice(&3u32.to_le_bytes()); // N_PM = 3
+        let mut off = 440usize;
+        // Type-1 physical map (length 6) carrying partition number 2.
+        lvd[off] = 1;
+        lvd[off + 1] = 6;
+        lvd[off + 4..off + 6].copy_from_slice(&2u16.to_le_bytes());
+        off += 6;
+        // Type-2 map (length 40) carrying the Metadata entity string.
+        lvd[off] = 2;
+        lvd[off + 1] = 40;
+        lvd[off + 4..off + 4 + 23].copy_from_slice(b"*UDF Metadata Partition");
+        off += 40;
+        // An unrecognised map type (length 4).
+        lvd[off] = 9;
+        lvd[off + 1] = 4;
+        off += 4;
+        lvd[264..268].copy_from_slice(&((off - 440) as u32).to_le_bytes()); // Map Table Length
+
+        let maps = parse_partition_maps(&lvd);
+        assert_eq!(maps.len(), 3);
+        assert_eq!(maps[0].kind, UdfPartitionKind::Physical);
+        assert_eq!(maps[0].partition_number, Some(2));
+        assert_eq!(maps[1].kind, UdfPartitionKind::Metadata);
+        assert_eq!(maps[2].kind, UdfPartitionKind::Unknown);
     }
 }
