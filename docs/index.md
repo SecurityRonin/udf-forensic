@@ -50,7 +50,7 @@ Production code is `#![forbid(unsafe_code)]` with bounds-checked reads, and the 
 
 ## Related
 
-Part of the [Security Ronin](https://github.com/SecurityRonin) forensic toolkit. Sibling filesystems: [`hfsplus-forensic`](https://github.com/SecurityRonin/hfsplus-forensic), [`ext4fs-forensic`](https://github.com/SecurityRonin/ext4fs-forensic), [`ntfs-forensic`](https://github.com/SecurityRonin/ntfs-forensic). Consumed by [`iso9660-forensic`](https://github.com/SecurityRonin/iso9660-forensic) for optical UDF/bridge discs.
+Part of the [Security Ronin](https://github.com/SecurityRonin) forensic toolkit. Sibling filesystems: [`hfsplus-forensic`](https://github.com/SecurityRonin/hfsplus-forensic), [`ext4fs-forensic`](https://github.com/SecurityRonin/ext4fs-forensic), [`ntfs-forensic`](https://github.com/SecurityRonin/ntfs-forensic). Consumed by [`forensic-vfs-engine`](https://github.com/SecurityRonin/forensic-vfs-engine) (behind the `vfs` feature) for optical UDF discs.
 
 ---
 
