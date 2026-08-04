@@ -472,9 +472,18 @@ fn read_vds_checked<R: Read + Seek>(
         return Ok(None);
     };
 
+    // Both operands are u32 fields from the descriptors, so their sum can leave
+    // the address space. A wrapped LBA would point at a real but wrong block --
+    // a confidently incorrect File Set Descriptor -- so an overflow means the
+    // descriptor pair does not describe a location and there is nothing to
+    // report.
+    let Some(fsd_lba) = partition_start.checked_add(fsd) else {
+        return Ok(None);
+    };
+
     Ok(Some(VdsInfo {
         partition_start,
-        fsd_lba: partition_start + fsd,
+        fsd_lba,
         partition_kind: kind,
         map_count,
     }))
@@ -593,25 +602,41 @@ fn parse_fids<R: Read + Seek>(
 
         if file_chars & FC_PARENT == 0 {
             let is_dir = file_chars & FC_DIRECTORY != 0;
-            let fe_lba = partition_start + icb_lbn;
-
-            let id_start = off + tag_size + 20 + impl_use_len;
-            let id_end = (id_start + file_id_len).min(data.len());
+            // The name-field bounds are header-derived too. Saturating is right
+            // here rather than skipping: an out-of-range span clamps to the end
+            // of the buffer, and the `id_end > id_start` test below then leaves
+            // the name empty instead of decoding anything.
+            let id_start = off
+                .saturating_add(tag_size)
+                .saturating_add(20)
+                .saturating_add(impl_use_len);
+            let id_end = id_start.saturating_add(file_id_len).min(data.len());
             let name = if id_end > id_start {
                 decode_osta_cs0(&data[id_start..id_end])
             } else {
                 String::new()
             };
 
-            // Read the FE to get the canonical file size.
-            let size = read_fe_info_len(reader, block_size, fe_lba).unwrap_or(0);
+            // Same hazard as the FSD address above, per directory entry. Both
+            // operands are u32 from the image, so their sum can leave the
+            // address space; a wrapped LBA would send the File Entry read at a
+            // real but wrong block and report a confidently incorrect size.
+            //
+            // Dropping the entry rather than `continue`-ing is deliberate: the
+            // loop advances `off` below this block, so skipping the iteration
+            // would leave the cursor where it was and spin forever on the same
+            // descriptor.
+            if let Some(fe_lba) = partition_start.checked_add(icb_lbn) {
+                // Read the FE to get the canonical file size.
+                let size = read_fe_info_len(reader, block_size, fe_lba).unwrap_or(0);
 
-            entries.push(UdfFileEntry {
-                name,
-                is_dir,
-                size,
-                fe_lba,
-            });
+                entries.push(UdfFileEntry {
+                    name,
+                    is_dir,
+                    size,
+                    fe_lba,
+                });
+            }
         }
 
         off += fid_advance.max(4);
