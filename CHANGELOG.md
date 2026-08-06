@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6](https://github.com/SecurityRonin/udf-forensic/compare/udf-forensic-v0.2.5...udf-forensic-v0.2.6) - 2026-08-06
+
+### Fixed
+
+- *(supply-chain)* trust safe-read as ours instead of exempting it
+
 ## [0.2.5](https://github.com/SecurityRonin/udf-forensic/compare/udf-forensic-v0.2.4...udf-forensic-v0.2.5) - 2026-08-04
 
 ### Fixed
