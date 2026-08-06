@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "udf-forensic"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "forensic-vfs",
  "forensicnomicon",
