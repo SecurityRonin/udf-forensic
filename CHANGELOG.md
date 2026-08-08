@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/SecurityRonin/udf-forensic/compare/udf-forensic-v0.2.6...udf-forensic-v0.2.7) - 2026-08-08
+
+### Documentation
+
+- unshadow vfs's module docs and drop a finding the analyzer cannot emit
+
+### Fixed
+
+- *(docs)* backtick the identifiers clippy's doc_markdown flags
+
 ## [0.2.6](https://github.com/SecurityRonin/udf-forensic/compare/udf-forensic-v0.2.5...udf-forensic-v0.2.6) - 2026-08-06
 
 ### Fixed
