@@ -16,11 +16,11 @@
 //!   Entry. [`FileSystem::read_dir`]/[`FileSystem::lookup`] cache each child by
 //!   `fe_lba`; the root FE is seeded as a directory at [`UdfVfs::open`].
 //!   [`FileSystem::meta`] consults that cache — the normal
-//!   root→read_dir→lookup→stat flow always populates it. An *untraversed file*
+//!   root→`read_dir`→`lookup`→`stat` flow always populates it. An *untraversed file*
 //!   FE cannot be classified as file-vs-dir (a loud [`VfsError::Decode`], never a
 //!   guess); the *root* FE is always resolvable (seeded).
 //! - **Times.** The UDF reader's public traversal API surfaces only
-//!   name/is_dir/size/fe_lba per child, not the per-File-Entry recording times,
+//!   `name`/`is_dir`/`size`/`fe_lba` per child, not the per-File-Entry recording times,
 //!   so [`FsMeta::times`] is all-`None` (honestly absent, not epoch-0). Wiring
 //!   the FE modification/creation times through is future work.
 //!   [`FileSystem::timestamp_zone`] is [`TimeZonePolicy::Utc`] — UDF ECMA-167
@@ -35,7 +35,7 @@
 //! - **Deleted/unallocated/symlinks.** Orphan/deleted File Entry recovery and
 //!   free-space enumeration are not yet surfaced, so
 //!   [`FileSystem::deleted`]/[`FileSystem::unallocated`] are empty streams;
-//!   UDF symlinks (PATH_COMPONENTS) are not decoded, so
+//!   UDF symlinks (`PATH_COMPONENTS`) are not decoded, so
 //!   [`FileSystem::read_link`] returns an empty target. All three are future
 //!   work, not fabricated data.
 
