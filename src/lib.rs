@@ -25,7 +25,6 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 pub mod findings;
 
-/// The forensic-vfs `FileSystem` adapter (behind the `vfs` feature).
 #[cfg(feature = "vfs")]
 pub mod vfs;
 

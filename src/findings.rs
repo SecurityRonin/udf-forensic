@@ -18,8 +18,6 @@
 //!   (polynomial `0x1021`, initial value `0x0000`) over the descriptor body.
 //!   Both are recomputed and compared against the recorded values; the check is
 //!   self-validating against the spec (no external oracle needed).
-//! - [`UdfAnomalyKind::OrphanFileEntry`] — a valid File Entry found in the
-//!   partition space that no directory File Identifier Descriptor references.
 //! - [`UdfAnomalyKind::FileAfterVolume`] — a File Entry whose modification time
 //!   is later than the File Set Descriptor's recording time.
 //! - [`UdfAnomalyKind::SlackData`] — non-zero bytes in a file's final-block
