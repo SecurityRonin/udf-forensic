@@ -1,4 +1,4 @@
-/target
+target/
 *.img
 # Real mkudffs-authored UDF fixtures are committed (mostly-zero, ~10 KB packed
 # each) so the real_media_tests run reproducibly; see tests/data/README.md.
