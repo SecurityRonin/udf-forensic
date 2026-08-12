@@ -32,12 +32,10 @@
 //!   yields a single logical run (`image_offset` = 0, `len` = file size) rather
 //!   than the true on-disk runs. Surfacing the real short/long allocation
 //!   descriptors is future work.
-//! - **Deleted/unallocated/symlinks.** Orphan/deleted File Entry recovery and
+//! - **Deleted/unallocated.** Orphan/deleted File Entry recovery and
 //!   free-space enumeration are not yet surfaced, so
-//!   [`FileSystem::deleted`]/[`FileSystem::unallocated`] are empty streams;
-//!   UDF symlinks (`PATH_COMPONENTS`) are not decoded, so
-//!   [`FileSystem::read_link`] returns an empty target. All three are future
-//!   work, not fabricated data.
+//!   [`FileSystem::deleted`]/[`FileSystem::unallocated`] are empty streams.
+//!   Both are future work, not fabricated data.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek};
@@ -49,13 +47,14 @@ use forensic_vfs::{
     SectorSizes, SmallHex, StreamId, TimeZonePolicy, VfsError, VfsResult,
 };
 
-use crate::{read_dir_at_lba, read_fe_data, read_fe_file_type, UdfState, FILE_TYPE_DIRECTORY};
+use crate::{read_dir_at_lba, read_fe_data, read_fe_file_type, UdfState, FILE_TYPE_DIRECTORY, FILE_TYPE_LINK};
 
 /// Per-node metadata harvested from a parent File Identifier Descriptor and
 /// cached by File Entry LBA.
 #[derive(Clone, Copy)]
 struct FeMeta {
     is_dir: bool,
+    is_symlink: bool,
     size: u64,
 }
 
@@ -93,6 +92,7 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
             state.root_fe_lba,
             FeMeta {
                 is_dir: true,
+                is_symlink: false,
                 size: 0,
             },
         );
@@ -148,9 +148,10 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
         match read_fe_file_type(&mut inner.reader, block_size, fe_lba) {
             Some(ft) => {
                 let is_dir = ft == FILE_TYPE_DIRECTORY;
+                let is_symlink = ft == FILE_TYPE_LINK;
                 let size =
                     crate::read_fe_info_len(&mut inner.reader, block_size, fe_lba).unwrap_or(0);
-                let m = FeMeta { is_dir, size };
+                let m = FeMeta { is_dir, is_symlink, size };
                 inner.cache.insert(fe_lba, m);
                 Ok(m)
             }
@@ -167,7 +168,7 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
 
     /// Read a directory's children, caching each child's `FeMeta`. A loud error
     /// if `fe_lba` is not a directory File Entry.
-    fn dir_children(&self, fe_lba: u32) -> VfsResult<Vec<crate::UdfFileEntry>> {
+    fn dir_children(&self, fe_lba: u32) -> VfsResult<(Vec<crate::UdfFileEntry>, Vec<FeMeta>)> {
         let block_size = self.state.block_size;
         let partition_start = self.state.partition_start;
         let mut inner = self.lock();
@@ -189,16 +190,28 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
                 detail: format!("directory File Entry at LBA {fe_lba} could not be read"),
                 bytes: SmallHex::new(&[]),
             })?;
+        // Classify each child from its own File Entry's ICB Tag File Type
+        // (the FID carries only the directory characteristic bit, so a
+        // symlink is invisible without the per-child FE read); fall back to
+        // the FID's is_dir when the child FE sector is missing.
+        let mut metas = Vec::with_capacity(children.len());
         for c in &children {
-            inner.cache.insert(
-                c.fe_lba,
-                FeMeta {
-                    is_dir: c.is_dir,
+            let meta = match read_fe_file_type(&mut inner.reader, block_size, c.fe_lba) {
+                Some(ft) => FeMeta {
+                    is_dir: ft == FILE_TYPE_DIRECTORY,
+                    is_symlink: ft == FILE_TYPE_LINK,
                     size: c.size,
                 },
-            );
+                None => FeMeta {
+                    is_dir: c.is_dir,
+                    is_symlink: false,
+                    size: c.size,
+                },
+            };
+            inner.cache.insert(c.fe_lba, meta);
+            metas.push(meta);
         }
-        Ok(children)
+        Ok((children, metas))
     }
 }
 
@@ -227,15 +240,18 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
 
     fn read_dir(&self, ino: FileId) -> VfsResult<DirStream> {
         let fe_lba = fe_lba_of(ino)?;
-        let children = self.dir_children(fe_lba)?;
+        let (children, metas) = self.dir_children(fe_lba)?;
         let out: Vec<VfsResult<VfsDirEntry>> = children
             .into_iter()
-            .map(|c| {
+            .zip(metas)
+            .map(|(c, meta)| {
                 Ok(VfsDirEntry {
                     name: c.name.into_bytes(),
                     id: FileId::Opaque(u64::from(c.fe_lba)),
-                    kind: if c.is_dir {
+                    kind: if meta.is_dir {
                         NodeKind::Dir
+                    } else if meta.is_symlink {
+                        NodeKind::Symlink
                     } else {
                         NodeKind::File
                     },
@@ -270,7 +286,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
 
     fn lookup(&self, parent: FileId, name: &[u8]) -> VfsResult<Option<FileId>> {
         let fe_lba = fe_lba_of(parent)?;
-        let children = self.dir_children(fe_lba)?;
+        let (children, _) = self.dir_children(fe_lba)?;
         for c in &children {
             if name.eq_ignore_ascii_case(c.name.as_bytes()) {
                 return Ok(Some(FileId::Opaque(u64::from(c.fe_lba))));
@@ -288,6 +304,8 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
             ino: u64::from(fe_lba),
             kind: if m.is_dir {
                 NodeKind::Dir
+            } else if m.is_symlink {
+                NodeKind::Symlink
             } else {
                 NodeKind::File
             },
@@ -337,10 +355,24 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
     }
 
     fn read_link(&self, ino: FileId, _cap: usize) -> VfsResult<Vec<u8>> {
-        // UDF PATH_COMPONENT symlinks are not decoded; a node reads as an empty
-        // target (matching the iso9660/ext4/NTFS adapters), not a per-node error.
-        let _ = fe_lba_of(ino)?;
-        Ok(Vec::new())
+        let fe_lba = fe_lba_of(ino)?;
+        let block_size = self.state.block_size;
+        let partition_start = self.state.partition_start;
+        let mut inner = self.lock();
+        let meta = Self::resolve(&mut inner, fe_lba, block_size)?;
+        if !meta.is_symlink {
+            // Not a symlink: empty target, not a per-node error (the contract
+            // for non-link nodes).
+            return Ok(Vec::new());
+        }
+        let data = read_fe_data(&mut inner.reader, block_size, partition_start, fe_lba)
+            .ok_or_else(|| VfsError::Decode {
+                layer: "udf",
+                offset: u64::from(fe_lba) * u64::from(block_size),
+                detail: format!("symbolic link File Entry at LBA {fe_lba} could not be read"),
+                bytes: SmallHex::new(&[]),
+            })?;
+        Ok(crate::decode_symlink_target(&data).into_bytes())
     }
 
     fn deleted(&self) -> VfsResult<NodeStream> {

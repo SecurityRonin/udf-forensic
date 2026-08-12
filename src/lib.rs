@@ -682,6 +682,10 @@ pub(crate) fn read_fe_file_type<R: Read + Seek>(
 #[cfg(feature = "vfs")]
 pub(crate) const FILE_TYPE_DIRECTORY: u8 = 4;
 
+/// ECMA-167 ICB Tag File Type for a symbolic link (4/14.6.6).
+#[cfg(feature = "vfs")]
+pub(crate) const FILE_TYPE_LINK: u8 = 0x0c;
+
 /// Collect data from short allocation descriptors (8 bytes each).
 fn read_extents_short<R: Read + Seek>(
     reader: &mut R,
@@ -775,6 +779,68 @@ fn decode_osta_cs0(bytes: &[u8]) -> String {
     } else {
         String::from_utf8_lossy(payload).into_owned()
     }
+}
+
+/// Decode a UDF symbolic link's `PATH_COMPONENT` record chain (ECMA-167
+/// 4/14.16.2, OSTA UDF 2.01 §2.2.8) into its target path, following the Linux
+/// kernel's `udf_pc_to_char` semantics (fs/udf/symlink.c):
+///
+/// - Record: `[componentType: u8, lengthComponentIdent: u8,
+///   componentFileVersionNum: u16le, componentIdent[length]]` — a 4-byte
+///   header (the kernel's `__le16 componentFileVersionNum`).
+/// - Type 1 (root): a non-empty record is a media-specific agreed location and
+///   is skipped; an empty record writes `/`.
+/// - Type 2 (parent): resets the target to the root (`/`).
+/// - Type 3 (`..`): writes `../`.
+/// - Type 4 (`.`): writes `./`.
+/// - Type 5 (name): a CS0-encoded identifier decoded with
+///   [`decode_osta_cs0`], followed by `/`.
+/// - Unknown types are skipped; the record length still advances.
+///
+/// The trailing separator is trimmed (the kernel's `p[-1] = '\0'`), so
+/// `..` + `README.txt` yields `../README.txt`. Hostile record chains cannot
+/// panic: out-of-range lengths stop the walk at the buffer end.
+pub fn decode_symlink_target(data: &[u8]) -> String {
+    let mut out = String::new();
+    let mut elen = 0usize;
+    while elen + 4 <= data.len() {
+        let component_type = data[elen];
+        let length = data[elen + 1] as usize;
+        let ident_start = elen + 4;
+        elen += 4;
+        match component_type {
+            // Root: an agreed media-specific location carries a non-empty
+            // identifier that the originator/receiver must interpret; skip it.
+            1 if length > 0 => {
+                elen += length;
+            }
+            1 => out.push('/'),
+            // Parent: reset to the root.
+            2 => {
+                out.clear();
+                out.push('/');
+            }
+            3 => out.push_str("../"),
+            4 => out.push_str("./"),
+            5 => {
+                if length > 0 && ident_start + length <= data.len() {
+                    out.push_str(&decode_osta_cs0(&data[ident_start..ident_start + length]));
+                }
+                out.push('/');
+                elen += length;
+            }
+            _ => {
+                elen += length;
+            }
+        }
+        if elen > data.len() {
+            break;
+        }
+    }
+    if out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    out
 }
 
 /// Seek to `byte_pos` and read exactly `buf.len()` bytes; returns `None` on any error.
@@ -1501,6 +1567,41 @@ mod synth_traversal_tests {
         assert_eq!(decode_osta_cs0(b"\x08hello"), "hello");
         // Compression id 16 = UTF-16BE.
         assert_eq!(decode_osta_cs0(&[16, 0x00, 0x41, 0x00, 0x42]), "AB");
+    }
+
+    #[test]
+    fn decode_symlink_target_relative_parent_and_name() {
+        // The exact bytes a Linux kernel (6.8) UDF driver wrote for a symlink
+        // whose target is "../README.txt" on a mkudffs 2.01 volume: a type-3
+        // ("..") record with an empty identifier, then a type-5 record holding
+        // an 11-byte CS0 name (compression id 8 + "README.txt"). Verified
+        // against `hdiutil attach` (macOS resolves it to "../README.txt").
+        let data = [
+            0x03, 0x00, 0x00, 0x00, // type 3 (".."), len 0, version 0
+            0x05, 0x0b, 0x00, 0x00, // type 5 (name), len 11, version 0
+            0x08, b'R', b'E', b'A', b'D', b'M', b'E', b'.', b't', b'x', b't',
+        ];
+        assert_eq!(decode_symlink_target(&data), "../README.txt");
+    }
+
+    #[test]
+    fn decode_symlink_target_absolute_utf16_and_empty() {
+        // Absolute: root (type 1) + UTF-16BE name (compression id 16).
+        let mut data = vec![0x01, 0x00, 0x00, 0x00, 0x05, 0x05, 0x00, 0x00, 0x10, 0x00, 0x41, 0x00, 0x42];
+        assert_eq!(decode_symlink_target(&data), "/AB");
+        // Empty chain and an all-garbage chain decode to empty, never panic.
+        assert_eq!(decode_symlink_target(&[]), "");
+        assert_eq!(decode_symlink_target(&[0x99, 0xff, 0x00, 0x00, 0x00]), "");
+        // A name record whose length overruns the buffer stops the walk.
+        data[5] = 0x7f;
+        assert_eq!(decode_symlink_target(&data), "/");
+    }
+
+    #[test]
+    fn decode_symlink_target_parent_resets_to_root() {
+        // Type 2 (parent) clears prior output and writes "/".
+        let data = [0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b', 0x02, 0x00, 0x00, 0x00];
+        assert_eq!(decode_symlink_target(&data), "/");
     }
 
     #[cfg(feature = "vfs")]
