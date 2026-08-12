@@ -810,13 +810,17 @@ pub fn decode_symlink_target(data: &[u8]) -> String {
         elen += 4;
         match component_type {
             // Root: an agreed media-specific location carries a non-empty
-            // identifier that the originator/receiver must interpret; skip it.
+            // identifier that the originator/receiver must interpret — the
+            // kernel breaks out of the walk entirely, leaving an empty target
+            // (never a fabricated path). An empty root record falls through to
+            // the parent semantics (`case 1` falls into `case 2`): the output
+            // resets to an absolute root.
             1 if length > 0 => {
-                elen += length;
+                break;
             }
-            1 => out.push('/'),
-            // Parent: reset to the root.
-            2 => {
+            // Parent: reset to the root (an empty root record falls through to
+            // the same behavior in the kernel).
+            1 | 2 => {
                 out.clear();
                 out.push('/');
             }
@@ -1479,8 +1483,9 @@ mod synth_traversal_tests {
 
         let entries = read_dir_at_lba(&mut r, st.block_size, st.partition_start, st.root_fe_lba)
             .expect("root directory reads");
-        // The parent FID is skipped; the six real children are surfaced.
-        assert_eq!(entries.len(), 6, "entries: {entries:?}");
+        // The parent FID is skipped; the seven real children are surfaced
+        // (including the synthetic symlink).
+        assert_eq!(entries.len(), 7, "entries: {entries:?}");
         let by_name = |n: &str| entries.iter().find(|e| e.name == n);
 
         assert!(by_name("sub").expect("sub").is_dir);
@@ -1595,6 +1600,21 @@ mod synth_traversal_tests {
         // A name record whose length overruns the buffer stops the walk.
         data[5] = 0x7f;
         assert_eq!(decode_symlink_target(&data), "/");
+    }
+
+    #[test]
+    fn decode_symlink_target_agreed_location_yields_empty_and_current_dir() {
+        // Type 1 with a non-empty identifier is a media-specific agreed
+        // location: the kernel breaks out and the target is empty (the
+        // originator/receiver must interpret the location) — never fabricated.
+        let data = [0x01, 0x02, 0x00, 0x00, b'A', b'B', 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b'];
+        assert_eq!(decode_symlink_target(&data), "");
+        // Type 4 (".") writes "./"; the trailing slash is trimmed.
+        let data = [0x04, 0x00, 0x00, 0x00, 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b'];
+        assert_eq!(decode_symlink_target(&data), "./ab");
+        // A lone current-directory record trims to ".".
+        let data = [0x04, 0x00, 0x00, 0x00];
+        assert_eq!(decode_symlink_target(&data), ".");
     }
 
     #[test]

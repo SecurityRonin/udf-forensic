@@ -390,6 +390,8 @@ mod tests {
     use super::*;
     use forensic_vfs::{Allocation, NodeKind, RunAlloc};
     use std::fs::File;
+    use std::io::Cursor;
+
 
     /// The committed real `mkudffs` fixture: a Type-1 physical partition with a
     /// 512-byte logical block. It is the only fixture whose partition kind the
@@ -400,6 +402,98 @@ mod tests {
         let path = format!("{}/tests/data/{}", env!("CARGO_MANIFEST_DIR"), PLAIN);
         let f = File::open(path).ok()?;
         UdfVfs::open(f).ok()
+    }
+
+    #[test]
+    fn synthetic_symlink_classifies_and_reads_link() {
+        // The synthetic image's root also carries a child FID whose FE cannot
+        // be read (BROKEN_DIR_FE), exercising the FID-characteristics fallback
+        // alongside the symlink classification.
+        let fs = UdfVfs::open(Cursor::new(crate::test_support::image())).expect("open synthetic image");
+        let children: Vec<_> = fs
+            .read_dir(fs.root())
+            .expect("root read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        let link = children
+            .iter()
+            .find(|e| e.name == b"lnk")
+            .expect("synthetic symlink present");
+        assert_eq!(link.kind, NodeKind::Symlink);
+        assert_eq!(fs.read_link(link.id, 4096).expect("read_link"), b"../README.txt");
+        assert_eq!(fs.meta(link.id).expect("meta").kind, NodeKind::Symlink);
+    }
+
+    #[test]
+    fn synthetic_symlink_with_unreadable_data_is_loud() {
+        // Break the symlink File Entry's allocation descriptors (ICB flags to
+        // an unknown allocation type) while leaving the file-type byte intact:
+        // classification succeeds, the data read fails loud.
+        let mut img = crate::test_support::image();
+        let o = crate::test_support::SYMLINK_FE as usize * crate::test_support::BS;
+        img[o + 34] = 0x07;
+        img[o + 35] = 0x00;
+        let fs = UdfVfs::open(Cursor::new(img)).expect("open synthetic image");
+        let children: Vec<_> = fs
+            .read_dir(fs.root())
+            .expect("root read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        let link = children.iter().find(|e| e.name == b"lnk").expect("synthetic symlink present");
+        assert!(matches!(link.kind, NodeKind::Symlink));
+        assert!(fs.read_link(link.id, 4096).is_err(), "unreadable symlink data must be loud");
+    }
+
+    #[test]
+    fn udf_symlink_surfaces_as_symlink_with_target() {
+        // The committed udf_symlink.img carries a real Linux-driver-authored
+        // PATH_COMPONENT symlink; the patched adapter must classify it and
+        // decode the target exactly as the Linux UDF driver does.
+        let path = format!("{}/tests/data/udf_symlink.img", env!("CARGO_MANIFEST_DIR"));
+        let Ok(f) = File::open(&path) else {
+            eprintln!("skip: udf_symlink.img fixture absent");
+            return;
+        };
+        let Ok(fs) = UdfVfs::open(f) else {
+            eprintln!("skip: udf_symlink.img did not mount");
+            return;
+        };
+        // Recurse into nested/ and find the symlink; also confirm the regular
+        // files still classify as files.
+        let root = fs.root();
+        let root_children: Vec<_> = fs
+            .read_dir(root)
+            .expect("root read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        let nested = root_children
+            .iter()
+            .find(|e| e.name == b"nested")
+            .expect("nested dir present");
+        assert_eq!(nested.kind, NodeKind::Dir);
+
+        let nested_children: Vec<_> = fs
+            .read_dir(nested.id)
+            .expect("nested read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        let link = nested_children
+            .iter()
+            .find(|e| e.name == b"readme-link.txt")
+            .expect("readme-link.txt present");
+        assert_eq!(link.kind, NodeKind::Symlink, "the adapter must classify the PATH_COMPONENT record as a symlink");
+        assert_eq!(
+            fs.read_link(link.id, 4096).expect("read_link"),
+            b"../README.txt",
+            "the decoded target must match the Linux UDF driver's own resolution"
+        );
+
+        let meta = fs.meta(link.id).expect("symlink meta");
+        assert_eq!(meta.kind, NodeKind::Symlink);
+        // A regular file is not a link and reads an empty target, not an error.
+        let readme = root_children.iter().find(|e| e.name == b"README.txt").expect("README.txt present");
+        assert_eq!(readme.kind, NodeKind::File);
+        assert_eq!(fs.read_link(readme.id, 4096).expect("read_link regular file"), b"");
     }
 
     #[test]
@@ -560,7 +654,7 @@ mod tests {
     // error paths are only reachable over a directory that actually holds files.
 
     use crate::test_support as ts;
-    use std::io::Cursor;
+    
 
     fn open_rich() -> UdfVfs<Cursor<Vec<u8>>> {
         UdfVfs::open(Cursor::new(ts::image())).expect("rich synthetic UDF opens")
