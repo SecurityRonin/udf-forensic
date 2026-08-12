@@ -788,8 +788,9 @@ fn decode_osta_cs0(bytes: &[u8]) -> String {
 /// - Record: `[componentType: u8, lengthComponentIdent: u8,
 ///   componentFileVersionNum: u16le, componentIdent[length]]` — a 4-byte
 ///   header (the kernel's `__le16 componentFileVersionNum`).
-/// - Type 1 (root): a non-empty record is a media-specific agreed location and
-///   is skipped; an empty record writes `/`.
+/// - Type 1 (root): a non-empty record is a media-specific agreed location —
+///   the kernel aborts the walk there, so the target decodes to empty (never
+///   a fabricated path); an empty record writes `/`.
 /// - Type 2 (parent): resets the target to the root (`/`).
 /// - Type 3 (`..`): writes `../`.
 /// - Type 4 (`.`): writes `./`.
@@ -1592,7 +1593,9 @@ mod synth_traversal_tests {
     #[test]
     fn decode_symlink_target_absolute_utf16_and_empty() {
         // Absolute: root (type 1) + UTF-16BE name (compression id 16).
-        let mut data = vec![0x01, 0x00, 0x00, 0x00, 0x05, 0x05, 0x00, 0x00, 0x10, 0x00, 0x41, 0x00, 0x42];
+        let mut data = vec![
+            0x01, 0x00, 0x00, 0x00, 0x05, 0x05, 0x00, 0x00, 0x10, 0x00, 0x41, 0x00, 0x42,
+        ];
         assert_eq!(decode_symlink_target(&data), "/AB");
         // Empty chain and an all-garbage chain decode to empty, never panic.
         assert_eq!(decode_symlink_target(&[]), "");
@@ -1607,10 +1610,14 @@ mod synth_traversal_tests {
         // Type 1 with a non-empty identifier is a media-specific agreed
         // location: the kernel breaks out and the target is empty (the
         // originator/receiver must interpret the location) — never fabricated.
-        let data = [0x01, 0x02, 0x00, 0x00, b'A', b'B', 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b'];
+        let data = [
+            0x01, 0x02, 0x00, 0x00, b'A', b'B', 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b',
+        ];
         assert_eq!(decode_symlink_target(&data), "");
         // Type 4 (".") writes "./"; the trailing slash is trimmed.
-        let data = [0x04, 0x00, 0x00, 0x00, 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b'];
+        let data = [
+            0x04, 0x00, 0x00, 0x00, 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b',
+        ];
         assert_eq!(decode_symlink_target(&data), "./ab");
         // A lone current-directory record trims to ".".
         let data = [0x04, 0x00, 0x00, 0x00];
@@ -1620,7 +1627,9 @@ mod synth_traversal_tests {
     #[test]
     fn decode_symlink_target_parent_resets_to_root() {
         // Type 2 (parent) clears prior output and writes "/".
-        let data = [0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b', 0x02, 0x00, 0x00, 0x00];
+        let data = [
+            0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b', 0x02, 0x00, 0x00, 0x00,
+        ];
         assert_eq!(decode_symlink_target(&data), "/");
     }
 

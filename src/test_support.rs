@@ -146,8 +146,16 @@ pub(crate) fn image() -> Vec<u8> {
     // The root directory no longer fits the File Entry's inline area, so it
     // lives in its own block (LBA 15) behind a short allocation descriptor.
     let root_dir_block = 15u32;
-    img[root_dir_block as usize * BS..root_dir_block as usize * BS + dir.len()].copy_from_slice(&dir);
-    stamp_fe(&mut img, ROOT_FE, 4, 0, dir.len() as u64, &short_ad(dir.len() as u32, root_dir_block));
+    img[root_dir_block as usize * BS..root_dir_block as usize * BS + dir.len()]
+        .copy_from_slice(&dir);
+    stamp_fe(
+        &mut img,
+        ROOT_FE,
+        4,
+        0,
+        dir.len() as u64,
+        &short_ad(dir.len() as u32, root_dir_block),
+    );
 
     // Subdirectory File Entry @5: an empty inline directory.
     stamp_fe(&mut img, SUBDIR_FE, 4, 3, 0, &[]);
@@ -160,7 +168,14 @@ pub(crate) fn image() -> Vec<u8> {
         0x05, 0x0b, 0x00, 0x00, // type 5 (name), len 11, version 0
         0x08, b'R', b'E', b'A', b'D', b'M', b'E', b'.', b't', b'x', b't',
     ];
-    stamp_fe(&mut img, SYMLINK_FE, 0x0c, 3, symlink_data.len() as u64, &symlink_data);
+    stamp_fe(
+        &mut img,
+        SYMLINK_FE,
+        0x0c,
+        3,
+        symlink_data.len() as u64,
+        &symlink_data,
+    );
 
     // Inline file File Entry @6: 4 bytes stored in the ICB.
     stamp_fe(&mut img, INLINE_FILE_FE, 5, 3, 4, b"abcd");
