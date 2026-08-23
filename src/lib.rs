@@ -788,15 +788,19 @@ fn decode_osta_cs0(bytes: &[u8]) -> String {
 /// - Record: `[componentType: u8, lengthComponentIdent: u8,
 ///   componentFileVersionNum: u16le, componentIdent[length]]` — a 4-byte
 ///   header (the kernel's `__le16 componentFileVersionNum`).
-/// - Type 1 (root): a non-empty record is a media-specific agreed location —
-///   the kernel aborts the walk there, so the target decodes to empty (never
-///   a fabricated path); an empty record writes `/`.
+/// - Type 1 (root): a non-empty record is a media-specific agreed location
+///   the originator and receiver must interpret. The kernel's `break` leaves
+///   the `switch`, not the loop, so it steps over the identifier and keeps
+///   walking; an empty record falls through to type 2 and writes `/`.
 /// - Type 2 (parent): resets the target to the root (`/`).
 /// - Type 3 (`..`): writes `../`.
 /// - Type 4 (`.`): writes `./`.
 /// - Type 5 (name): a CS0-encoded identifier decoded with
 ///   [`decode_osta_cs0`], followed by `/`.
-/// - Unknown types are skipped; the record length still advances.
+/// - Unknown types: the kernel's `switch` has no `default:` arm, so only the
+///   4-byte header is consumed and the identifier bytes are read as the next
+///   record header. Skipping the identifier too would resynchronize the walk
+///   differently from the mount, which is the ground truth to reproduce.
 ///
 /// The trailing separator is trimmed (the kernel's `p[-1] = '\0'`), so
 /// `..` + `README.txt` yields `../README.txt`. Hostile record chains cannot
@@ -811,13 +815,14 @@ pub fn decode_symlink_target(data: &[u8]) -> String {
         elen += 4;
         match component_type {
             // Root: an agreed media-specific location carries a non-empty
-            // identifier that the originator/receiver must interpret — the
-            // kernel breaks out of the walk entirely, leaving an empty target
-            // (never a fabricated path). An empty root record falls through to
+            // identifier that the originator/receiver must interpret. The
+            // kernel steps over that identifier and continues the walk (its
+            // `break` exits the switch, not the loop), so the components that
+            // follow are still decoded. An empty root record falls through to
             // the parent semantics (`case 1` falls into `case 2`): the output
             // resets to an absolute root.
             1 if length > 0 => {
-                break;
+                elen += length;
             }
             // Parent: reset to the root (an empty root record falls through to
             // the same behavior in the kernel).
@@ -834,9 +839,10 @@ pub fn decode_symlink_target(data: &[u8]) -> String {
                 out.push('/');
                 elen += length;
             }
-            _ => {
-                elen += length;
-            }
+            // An unrecognized type matches no arm of the kernel's switch, and
+            // it has no `default:`, so the cursor advances by the header
+            // alone — the identifier bytes become the next record header.
+            _ => {}
         }
         if elen > data.len() {
             break;
