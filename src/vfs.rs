@@ -360,7 +360,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
         Ok(n)
     }
 
-    fn read_link(&self, ino: FileId, _cap: usize) -> VfsResult<Vec<u8>> {
+    fn read_link(&self, ino: FileId, cap: usize) -> VfsResult<Vec<u8>> {
         let fe_lba = fe_lba_of(ino)?;
         let block_size = self.state.block_size;
         let partition_start = self.state.partition_start;
@@ -378,7 +378,12 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
                 detail: format!("symbolic link File Entry at LBA {fe_lba} could not be read"),
                 bytes: SmallHex::new(&[]),
             })?;
-        Ok(crate::decode_symlink_target(&data).into_bytes())
+        // Every component length in the chain is image-controlled, so a hostile
+        // link must not allocate past what the caller asked for (matches the
+        // ext4/xfs/ufs/btrfs/zfs adapters).
+        let mut target = crate::decode_symlink_target(&data).into_bytes();
+        target.truncate(cap);
+        Ok(target)
     }
 
     fn deleted(&self) -> VfsResult<NodeStream> {
