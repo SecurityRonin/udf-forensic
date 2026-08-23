@@ -506,6 +506,20 @@ mod tests {
             b"../README.txt",
             "the decoded target must match the Linux UDF driver's own resolution"
         );
+        // `cap` is the trait's hostile-allocation bound: "Read a symlink
+        // target, capped so a hostile symlink cannot allocate without bound."
+        // Every component length in the chain is image-controlled, so the
+        // adapter must not return more than the caller asked for.
+        assert_eq!(
+            fs.read_link(link.id, 4).expect("read_link capped"),
+            b"../R",
+            "a cap shorter than the target must truncate it"
+        );
+        assert_eq!(
+            fs.read_link(link.id, 0).expect("read_link zero cap"),
+            b"",
+            "cap == 0 must yield an empty target"
+        );
 
         let meta = fs.meta(link.id).expect("symlink meta");
         assert_eq!(meta.kind, NodeKind::Symlink);
