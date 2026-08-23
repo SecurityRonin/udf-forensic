@@ -1606,14 +1606,27 @@ mod synth_traversal_tests {
     }
 
     #[test]
-    fn decode_symlink_target_agreed_location_yields_empty_and_current_dir() {
+    fn decode_symlink_target_agreed_location_skips_ident_and_continues() {
         // Type 1 with a non-empty identifier is a media-specific agreed
-        // location: the kernel breaks out and the target is empty (the
-        // originator/receiver must interpret the location) — never fabricated.
+        // location. The kernel's `break` leaves the *switch*, not the *while*:
+        //
+        //     case 1:
+        //         if (pc->lengthComponentIdent > 0) {
+        //             elen += pc->lengthComponentIdent;
+        //             break;          /* switch, not the loop */
+        //         }
+        //         fallthrough;
+        //
+        // so it steps over the identifier and keeps walking the chain
+        // (fs/udf/symlink.c). Aborting the whole walk would silently drop
+        // every component that follows — under-reporting a target rather than
+        // surfacing an error.
+        //
+        // Here: type 1 ident "AB", then a type-5 name "ab".
         let data = [
             0x01, 0x02, 0x00, 0x00, b'A', b'B', 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b',
         ];
-        assert_eq!(decode_symlink_target(&data), "");
+        assert_eq!(decode_symlink_target(&data), "ab");
         // Type 4 (".") writes "./"; the trailing slash is trimmed.
         let data = [
             0x04, 0x00, 0x00, 0x00, 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b',
@@ -1622,6 +1635,25 @@ mod synth_traversal_tests {
         // A lone current-directory record trims to ".".
         let data = [0x04, 0x00, 0x00, 0x00];
         assert_eq!(decode_symlink_target(&data), ".");
+    }
+
+    #[test]
+    fn decode_symlink_target_unknown_type_advances_only_the_header() {
+        // The kernel's switch has no `default:` arm, so an unrecognized
+        // component type consumes only `sizeof(struct pathComponent)` (4
+        // bytes) and its identifier bytes are then read as the next record
+        // header. Skipping `lengthComponentIdent` as well would resynchronize
+        // the walk differently from the kernel, and the mount is the ground
+        // truth a forensic reader has to reproduce.
+        //
+        // Type 9 (unknown) declaring a 4-byte identifier whose bytes are
+        // themselves a well-formed type-4 (".") record.
+        let data = [0x09, 0x04, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00];
+        assert_eq!(
+            decode_symlink_target(&data),
+            ".",
+            "an unknown record advances four bytes, so its payload is the next header"
+        );
     }
 
     #[test]
