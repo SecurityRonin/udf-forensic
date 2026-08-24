@@ -682,9 +682,30 @@ pub(crate) fn read_fe_file_type<R: Read + Seek>(
 #[cfg(feature = "vfs")]
 pub(crate) const FILE_TYPE_DIRECTORY: u8 = 4;
 
+/// ECMA-167 ICB Tag File Type for a regular file — a random-access byte
+/// sequence (4/14.6.6).
+#[cfg(feature = "vfs")]
+pub(crate) const FILE_TYPE_REGULAR: u8 = 0x05;
+
 /// ECMA-167 ICB Tag File Type for a symbolic link (4/14.6.6).
 #[cfg(feature = "vfs")]
 pub(crate) const FILE_TYPE_LINK: u8 = 0x0c;
+
+/// ECMA-167 ICB Tag File Type for a block special device (4/14.6.6).
+#[cfg(feature = "vfs")]
+pub(crate) const FILE_TYPE_BLOCK_DEVICE: u8 = 0x06;
+
+/// ECMA-167 ICB Tag File Type for a character special device (4/14.6.6).
+#[cfg(feature = "vfs")]
+pub(crate) const FILE_TYPE_CHAR_DEVICE: u8 = 0x07;
+
+/// ECMA-167 ICB Tag File Type for a FIFO / named pipe (4/14.6.6).
+#[cfg(feature = "vfs")]
+pub(crate) const FILE_TYPE_FIFO: u8 = 0x09;
+
+/// ECMA-167 ICB Tag File Type for a socket (4/14.6.6).
+#[cfg(feature = "vfs")]
+pub(crate) const FILE_TYPE_SOCKET: u8 = 0x0a;
 
 /// Collect data from short allocation descriptors (8 bytes each).
 fn read_extents_short<R: Read + Seek>(

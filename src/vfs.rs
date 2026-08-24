@@ -48,15 +48,36 @@ use forensic_vfs::{
 };
 
 use crate::{
-    read_dir_at_lba, read_fe_data, read_fe_file_type, UdfState, FILE_TYPE_DIRECTORY, FILE_TYPE_LINK,
+    read_dir_at_lba, read_fe_data, read_fe_file_type, UdfState, FILE_TYPE_BLOCK_DEVICE,
+    FILE_TYPE_CHAR_DEVICE, FILE_TYPE_DIRECTORY, FILE_TYPE_FIFO, FILE_TYPE_LINK, FILE_TYPE_SOCKET,
 };
+
+/// The node kind an ECMA-167 ICB Tag File Type denotes (4/14.6.6).
+///
+/// A type this reader does not recognize is [`NodeKind::Other`] rather than
+/// [`NodeKind::File`]: "the format said something we do not model" and "the
+/// format said regular file" are different observations, and collapsing them
+/// would fabricate the second.
+#[cfg(feature = "vfs")]
+fn kind_of_file_type(file_type: u8) -> NodeKind {
+    match file_type {
+        FILE_TYPE_DIRECTORY => NodeKind::Dir,
+        crate::FILE_TYPE_REGULAR => NodeKind::File,
+        FILE_TYPE_LINK => NodeKind::Symlink,
+        FILE_TYPE_CHAR_DEVICE => NodeKind::CharDevice,
+        FILE_TYPE_BLOCK_DEVICE => NodeKind::BlockDevice,
+        FILE_TYPE_FIFO => NodeKind::Fifo,
+        FILE_TYPE_SOCKET => NodeKind::Socket,
+        _ => NodeKind::Other,
+    }
+}
 
 /// Per-node metadata harvested from a parent File Identifier Descriptor and
 /// cached by File Entry LBA.
 #[derive(Clone, Copy)]
 struct FeMeta {
     is_dir: bool,
-    is_symlink: bool,
+    kind: NodeKind,
     size: u64,
 }
 
@@ -94,7 +115,7 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
             state.root_fe_lba,
             FeMeta {
                 is_dir: true,
-                is_symlink: false,
+                kind: NodeKind::Dir,
                 size: 0,
             },
         );
@@ -150,12 +171,11 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
         match read_fe_file_type(&mut inner.reader, block_size, fe_lba) {
             Some(ft) => {
                 let is_dir = ft == FILE_TYPE_DIRECTORY;
-                let is_symlink = ft == FILE_TYPE_LINK;
                 let size =
                     crate::read_fe_info_len(&mut inner.reader, block_size, fe_lba).unwrap_or(0);
                 let m = FeMeta {
                     is_dir,
-                    is_symlink,
+                    kind: kind_of_file_type(ft),
                     size,
                 };
                 inner.cache.insert(fe_lba, m);
@@ -205,12 +225,18 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
             let meta = match read_fe_file_type(&mut inner.reader, block_size, c.fe_lba) {
                 Some(ft) => FeMeta {
                     is_dir: ft == FILE_TYPE_DIRECTORY,
-                    is_symlink: ft == FILE_TYPE_LINK,
+                    kind: kind_of_file_type(ft),
                     size: c.size,
                 },
+                // The child's File Entry sector could not be read: fall back to
+                // the FID's directory bit, which is all the parent records.
                 None => FeMeta {
                     is_dir: c.is_dir,
-                    is_symlink: false,
+                    kind: if c.is_dir {
+                        NodeKind::Dir
+                    } else {
+                        NodeKind::Other
+                    },
                     size: c.size,
                 },
             };
@@ -254,13 +280,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
                 Ok(VfsDirEntry {
                     name: c.name.into_bytes(),
                     id: FileId::Opaque(u64::from(c.fe_lba)),
-                    kind: if meta.is_dir {
-                        NodeKind::Dir
-                    } else if meta.is_symlink {
-                        NodeKind::Symlink
-                    } else {
-                        NodeKind::File
-                    },
+                    kind: meta.kind,
                 })
             })
             .collect();
@@ -308,13 +328,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
         let m = Self::resolve(&mut inner, fe_lba, block_size)?;
         Ok(FsMeta {
             ino: u64::from(fe_lba),
-            kind: if m.is_dir {
-                NodeKind::Dir
-            } else if m.is_symlink {
-                NodeKind::Symlink
-            } else {
-                NodeKind::File
-            },
+            kind: m.kind,
             allocated: Allocation::Allocated,
             size: m.size,
             nlink: 1,
@@ -366,7 +380,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
         let partition_start = self.state.partition_start;
         let mut inner = self.lock();
         let meta = Self::resolve(&mut inner, fe_lba, block_size)?;
-        if !meta.is_symlink {
+        if meta.kind != NodeKind::Symlink {
             // Not a symlink: empty target, not a per-node error (the contract
             // for non-link nodes).
             return Ok(Vec::new());
