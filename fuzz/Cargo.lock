@@ -33,31 +33,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "forensicnomicon"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "feb4755bb43fc9c85fbf91bf37399f2f3ca958f35a7e90ca6a4f6f25a6664604"
-dependencies = [
- "forensicnomicon-core",
- "forensicnomicon-data",
-]
-
-[[package]]
-name = "forensicnomicon-core"
-version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d65a733200c34a6595461a80c6a3ca95816c63b55104ef72630c5324a74a6680"
-
-[[package]]
-name = "forensicnomicon-data"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "826351faee29aabf7561d741e4fabb56b2b237be6c8d483c4df181e93b5f8b67"
-dependencies = [
- "forensicnomicon-core",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -113,10 +88,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "udf-forensic"
-version = "0.2.3"
+name = "udf-core"
+version = "0.1.0"
 dependencies = [
- "forensicnomicon",
  "safe-read",
 ]
 
@@ -125,5 +99,5 @@ name = "udf-forensic-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
- "udf-forensic",
+ "udf-core",
 ]

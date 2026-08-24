@@ -434,7 +434,7 @@ mod tests {
     const PLAIN: &str = "udf_plain.img";
 
     fn open_plain() -> Option<UdfVfs<File>> {
-        let path = format!("{}/tests/data/{}", env!("CARGO_MANIFEST_DIR"), PLAIN);
+        let path = format!("{}/../tests/data/{}", env!("CARGO_MANIFEST_DIR"), PLAIN);
         let f = File::open(path).ok()?;
         UdfVfs::open(f).ok()
     }
@@ -500,7 +500,7 @@ mod tests {
         // File Entry offsets in this fixture: nodes/ 137216, symlink 137728,
         // chardev 138240, blockdev 138752, fifo 139264, socket 139776.
         let path = format!(
-            "{}/tests/data/udf_all_node_types.img",
+            "{}/../tests/data/udf_all_node_types.img",
             env!("CARGO_MANIFEST_DIR")
         );
         // The fixture is committed, not gitignored, so its absence is a failure
@@ -590,7 +590,7 @@ mod tests {
         // the format states plainly. `udf_all_node_types.img` carries one of
         // each, created by the Linux UDF driver via mknod/mkfifo/bind.
         let path = format!(
-            "{}/tests/data/udf_all_node_types.img",
+            "{}/../tests/data/udf_all_node_types.img",
             env!("CARGO_MANIFEST_DIR")
         );
         let Ok(f) = File::open(&path) else {
@@ -667,7 +667,10 @@ mod tests {
         // The committed udf_symlink.img carries a real Linux-driver-authored
         // PATH_COMPONENT symlink; the patched adapter must classify it and
         // decode the target exactly as the Linux UDF driver does.
-        let path = format!("{}/tests/data/udf_symlink.img", env!("CARGO_MANIFEST_DIR"));
+        let path = format!(
+            "{}/../tests/data/udf_symlink.img",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let Ok(f) = File::open(&path) else {
             eprintln!("skip: udf_symlink.img fixture absent");
             return;

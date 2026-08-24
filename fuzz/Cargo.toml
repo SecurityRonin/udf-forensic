@@ -17,10 +17,10 @@ libfuzzer-sys = "0.4"
 
 # The fuzzed entry points (detection, the AVDP→VDS→FSD bootstrap, File Entry
 # data + allocation descriptors, directory FID traversal + OSTA name decode)
-# all live in the udf-forensic reader. `vfs` off — the fuzzed surface is the
-# raw byte parsers, not the forensic-vfs adapter.
-[dependencies.udf-forensic]
-path = ".."
+# all live in the udf-core reader. `vfs` off — the fuzzed surface is the raw
+# byte parsers, not the forensic-vfs adapter.
+[dependencies.udf-core]
+path = "../core"
 
 [[bin]]
 name = "detect"

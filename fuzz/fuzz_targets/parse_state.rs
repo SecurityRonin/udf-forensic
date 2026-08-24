@@ -10,6 +10,6 @@ use std::io::Cursor;
 fuzz_target!(|data: &[u8]| {
     // The checked variant surfaces the full AVDP→VDS→FSD chain (I/O errors
     // distinguished from structural negatives); the lenient wrapper folds them.
-    let _ = udf_forensic::parse_udf_state_checked(&mut Cursor::new(data));
-    let _ = udf_forensic::parse_udf_state(&mut Cursor::new(data));
+    let _ = udf_core::parse_udf_state_checked(&mut Cursor::new(data));
+    let _ = udf_core::parse_udf_state(&mut Cursor::new(data));
 });

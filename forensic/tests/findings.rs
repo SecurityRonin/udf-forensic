@@ -19,9 +19,9 @@ use std::io::Cursor;
 use udf_forensic::findings::{analyze, UdfAnomalyKind};
 use udf_forensic::Severity;
 
-const PLAIN: &[u8] = include_bytes!("data/udf_plain.img");
-const VAT: &[u8] = include_bytes!("data/udf_vat.img");
-const SPAR: &[u8] = include_bytes!("data/udf_spar.img");
+const PLAIN: &[u8] = include_bytes!("../../tests/data/udf_plain.img");
+const VAT: &[u8] = include_bytes!("../../tests/data/udf_vat.img");
+const SPAR: &[u8] = include_bytes!("../../tests/data/udf_spar.img");
 
 fn anomalies(image: &[u8]) -> Vec<udf_forensic::findings::UdfAnomaly> {
     let mut r = Cursor::new(image.to_vec());

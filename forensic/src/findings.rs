@@ -31,7 +31,7 @@ use core::fmt;
 use std::collections::HashSet;
 use std::io::{self, Read, Seek};
 
-use crate::{
+use udf_core::{
     descriptor_label, ecma167_crc, fsd_recording_time, tag_checksum, UdfState, MAX_BLOCK_SIZE,
     TAG_EFE, TAG_FE, TAG_FE_ALT, TAG_TERM,
 };
@@ -263,7 +263,7 @@ impl fmt::Display for UdfAnomaly {
 pub fn analyze<R: Read + Seek>(reader: &mut R) -> io::Result<Vec<UdfAnomaly>> {
     let mut out = Vec::new();
 
-    let Some(state) = crate::parse_udf_state_checked(reader)? else {
+    let Some(state) = udf_core::parse_udf_state_checked(reader)? else {
         return Ok(out);
     };
 
@@ -294,7 +294,7 @@ fn audit_tag_at<R: Read + Seek>(
 ) -> io::Result<u16> {
     let mut buf = [0u8; MAX_BLOCK_SIZE];
     let sector = &mut buf[..bs as usize];
-    crate::seek_read_checked(reader, u64::from(lba) * u64::from(bs), sector)?;
+    udf_core::seek_read_checked(reader, u64::from(lba) * u64::from(bs), sector)?;
 
     let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
     if tag_ident == 0 {
@@ -386,7 +386,7 @@ fn walk_directory_tree<R: Read + Seek>(
         // Validate the directory's own File Entry tag + per-file audits.
         audit_file_entry(reader, bs, part_start, dir_fe_lba, volume_time, out)?;
 
-        let Some(children) = crate::read_dir_at_lba(reader, bs, part_start, dir_fe_lba) else {
+        let Some(children) = udf_core::read_dir_at_lba(reader, bs, part_start, dir_fe_lba) else {
             continue; // cov:unreachable: a queued LBA is always a valid dir FE
         };
         for child in children {
@@ -414,7 +414,7 @@ fn audit_file_entry<R: Read + Seek>(
 
     let mut buf = [0u8; MAX_BLOCK_SIZE];
     let sector = &mut buf[..bs as usize];
-    crate::seek_read_checked(reader, u64::from(fe_lba) * u64::from(bs), sector)?;
+    udf_core::seek_read_checked(reader, u64::from(fe_lba) * u64::from(bs), sector)?;
     let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
     if tag_ident != TAG_FE && tag_ident != TAG_FE_ALT && tag_ident != TAG_EFE {
         return Ok(()); // cov:unreachable: caller only passes File Entry LBAs
@@ -422,7 +422,8 @@ fn audit_file_entry<R: Read + Seek>(
     let is_efe = tag_ident == TAG_EFE;
 
     // Modification time vs the volume recording time.
-    if let (Some(vol), Some(mtime)) = (volume_time, crate::fe_modification_time(sector, is_efe)) {
+    if let (Some(vol), Some(mtime)) = (volume_time, udf_core::fe_modification_time(sector, is_efe))
+    {
         if mtime.as_str() > vol {
             out.push(UdfAnomaly::new(UdfAnomalyKind::FileAfterVolume {
                 lba: fe_lba,
@@ -433,7 +434,8 @@ fn audit_file_entry<R: Read + Seek>(
     }
 
     // Final-block slack for the file's data.
-    if let Some((nonzero, slack)) = crate::fe_slack_nonzero(reader, bs, partition_start, fe_lba) {
+    if let Some((nonzero, slack)) = udf_core::fe_slack_nonzero(reader, bs, partition_start, fe_lba)
+    {
         if nonzero > 0 {
             out.push(UdfAnomaly::new(UdfAnomalyKind::SlackData {
                 lba: fe_lba,
@@ -464,7 +466,7 @@ mod tests {
         let bs = 512usize;
         let mut img = vec![0u8; bs * 8];
         let fe = 4 * bs;
-        img[fe..fe + 2].copy_from_slice(&crate::TAG_FE.to_le_bytes());
+        img[fe..fe + 2].copy_from_slice(&udf_core::TAG_FE.to_le_bytes());
         img[fe + 34..fe + 36].copy_from_slice(&0u16.to_le_bytes()); // short_ad alloc
         img[fe + 56..fe + 64].copy_from_slice(&info_len.to_le_bytes());
         img[fe + 168..fe + 172].copy_from_slice(&0u32.to_le_bytes()); // L_EA
@@ -544,17 +546,17 @@ mod tests {
         img[o..o + 2].copy_from_slice(&tag_id.to_le_bytes());
         img[o + 2..o + 4].copy_from_slice(&0x0102u16.to_le_bytes()); // descriptor version
         img[o + 12..o + 16].copy_from_slice(&(lba as u32).to_le_bytes()); // tag location
-        let crc = crate::ecma167_crc(&img[o + 16..o + 16 + crc_len as usize]);
+        let crc = udf_core::ecma167_crc(&img[o + 16..o + 16 + crc_len as usize]);
         img[o + 8..o + 10].copy_from_slice(&crc.to_le_bytes());
         img[o + 10..o + 12].copy_from_slice(&crc_len.to_le_bytes());
-        img[o + 4] = crate::tag_checksum(&img[o..o + 16]);
+        img[o + 4] = udf_core::tag_checksum(&img[o..o + 16]);
     }
 
     /// Write one inline File Identifier Descriptor (16-byte tag) into `data` at
     /// `off`, naming a child File Entry at logical block `child_lbn`, and return
     /// the advance to the next FID.
     fn write_fid(data: &mut [u8], off: usize, child_lbn: u32, is_dir: bool, name: &[u8]) -> usize {
-        data[off..off + 2].copy_from_slice(&crate::TAG_FID.to_le_bytes());
+        data[off..off + 2].copy_from_slice(&udf_core::TAG_FID.to_le_bytes());
         // body @16: file_version(2) file_chars(1) L_FI(1) ICB long_ad(16) L_IU(2) FI…
         let body = off + 16;
         data[body] = 1; // file version (low byte)
@@ -581,7 +583,7 @@ mod tests {
         img[o + 168..o + 172].copy_from_slice(&0u32.to_le_bytes()); // L_EA
         img[o + 172..o + 176].copy_from_slice(&(fids.len() as u32).to_le_bytes()); // L_AD
         img[o + 176..o + 176 + fids.len()].copy_from_slice(fids);
-        stamp_tag(img, lba, crate::TAG_FE, 200);
+        stamp_tag(img, lba, udf_core::TAG_FE, 200);
     }
 
     /// A complete minimal 512-byte-block UDF: AVDP → VDS(PD, LVD, LVID, TERM) →
@@ -594,13 +596,13 @@ mod tests {
         let avdp = 256 * BS;
         img[avdp + 16..avdp + 20].copy_from_slice(&(4u32 * BS as u32).to_le_bytes()); // vds_len bytes
         img[avdp + 20..avdp + 24].copy_from_slice(&260u32.to_le_bytes()); // vds_loc
-        stamp_tag(&mut img, 256, crate::TAG_AVDP, 16);
+        stamp_tag(&mut img, 256, udf_core::TAG_AVDP, 16);
 
         // PD @260: partition number 0, starting location = part_start.
         let pd = 260 * BS;
         img[pd + 22..pd + 24].copy_from_slice(&0u16.to_le_bytes());
         img[pd + 188..pd + 192].copy_from_slice(&part_start.to_le_bytes());
-        stamp_tag(&mut img, 260, crate::TAG_PD, 200);
+        stamp_tag(&mut img, 260, udf_core::TAG_PD, 200);
 
         // LVD @261: FSD ICB long_ad @248 (lbn@252), partition ref 0; one Type-1
         // partition map (N_PM=1, map_table_len=6) at byte 440.
@@ -612,7 +614,7 @@ mod tests {
         img[lvd + 440] = 1; // map type 1
         img[lvd + 441] = 6; // map length
         img[lvd + 444..lvd + 446].copy_from_slice(&0u16.to_le_bytes()); // partition number
-        stamp_tag(&mut img, 261, crate::TAG_LVD, 400);
+        stamp_tag(&mut img, 261, udf_core::TAG_LVD, 400);
 
         // LVID @262 — a descriptor the bootstrap walk recognises but does not
         // terminate on (exercises the `audit_tag_at` non-terminator arm), then a
@@ -625,7 +627,7 @@ mod tests {
         img[fsd + 16 + 4] = 6;
         img[fsd + 16 + 5] = 21;
         img[fsd + 404..fsd + 408].copy_from_slice(&4u32.to_le_bytes()); // root FE logical block 4
-        stamp_tag(&mut img, 3, crate::TAG_FSD, 400);
+        stamp_tag(&mut img, 3, udf_core::TAG_FSD, 400);
 
         // Root directory FE @4: inline FIDs → subdir (lbn 6) + file (lbn 7).
         let mut fids = vec![0u8; 160];
@@ -645,7 +647,7 @@ mod tests {
         img[ff + 168..ff + 172].copy_from_slice(&0u32.to_le_bytes());
         img[ff + 172..ff + 176].copy_from_slice(&4u32.to_le_bytes());
         img[ff + 176..ff + 180].copy_from_slice(b"abcd");
-        stamp_tag(&mut img, 7, crate::TAG_FE, 200);
+        stamp_tag(&mut img, 7, udf_core::TAG_FE, 200);
 
         img
     }
@@ -683,9 +685,9 @@ mod tests {
         // the CRC check is skipped (defensive bound), but the checksum still runs
         // and, being valid here, yields no anomaly.
         let mut img = vec![0u8; BS];
-        img[0..2].copy_from_slice(&crate::TAG_FSD.to_le_bytes());
+        img[0..2].copy_from_slice(&udf_core::TAG_FSD.to_le_bytes());
         img[10..12].copy_from_slice(&0xFFFFu16.to_le_bytes()); // crc_len > block
-        img[4] = crate::tag_checksum(&img[..16]); // valid checksum
+        img[4] = udf_core::tag_checksum(&img[..16]); // valid checksum
         let mut r = Cursor::new(img);
         let mut out = Vec::new();
         audit_tag_at(&mut r, BS as u32, 0, &mut out).unwrap();
@@ -767,7 +769,7 @@ mod tests {
         img[ff + 84 + 2..ff + 84 + 4].copy_from_slice(&2099i16.to_le_bytes());
         img[ff + 84 + 4] = 1; // month
         img[ff + 84 + 5] = 1; // day
-        stamp_tag(&mut img, 7, crate::TAG_FE, 200);
+        stamp_tag(&mut img, 7, udf_core::TAG_FE, 200);
         let mut r = Cursor::new(img);
         let a = analyze(&mut r).unwrap();
         let taf: Vec<_> = a

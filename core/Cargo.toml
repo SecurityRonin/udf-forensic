@@ -1,0 +1,34 @@
+[package]
+name = "udf-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "From-scratch UDF (ECMA-167 / OSTA) reader — volume recognition, partition maps (physical/virtual/sparable/metadata), File Entry and directory (FID) traversal, file data, over any Read + Seek source. No findings; the udf-forensic crate grades over this."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/udf-core"
+readme.workspace = true
+keywords = ["forensics", "udf", "ecma-167", "filesystem", "dfir"]
+categories = ["parser-implementations", "filesystem"]
+# Real mkudffs-authored UDF images used only by the reader's own tests; committed
+# for reproducible local validation but never shipped to consumers.
+exclude = ["/tests/data/*.img"]
+
+[features]
+serde = ["dep:serde"]
+# Adapt `UdfState` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`) so a
+# UDF volume composes as `Arc<dyn FileSystem>` in the forensic-vfs engine.
+vfs = ["dep:forensic-vfs"]
+
+[dependencies]
+safe-read = { workspace = true }
+serde = { workspace = true, optional = true }
+# Optional so a bare reader stays dependency-light; the `vfs` feature turns on
+# the adapter. Note: this reader carries NO `forensicnomicon` dependency — that
+# lives with the analyzer in udf-forensic, keeping udf-core lean for a consumer
+# that only reads a volume.
+forensic-vfs = { workspace = true, optional = true }
+
+[lints]
+workspace = true

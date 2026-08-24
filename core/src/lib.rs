@@ -23,30 +23,24 @@
 use safe_read::{le_u32, le_u64};
 use std::io::{self, Read, Seek, SeekFrom};
 
-pub mod findings;
-
 #[cfg(feature = "vfs")]
 pub mod vfs;
 
 #[cfg(test)]
 pub(crate) mod test_support;
 
-/// The canonical 5-level severity scale, re-exported at the crate root for
-/// convenience (the analyzer grades every finding on it).
-pub use forensicnomicon::report::Severity;
-
 // ── ECMA-167 / UDF tag identifiers ───────────────────────────────────────────
 
-const TAG_AVDP: u16 = 2;
-const TAG_PD: u16 = 5;
-const TAG_LVD: u16 = 6;
-const TAG_TERM: u16 = 8;
-const TAG_FSD: u16 = 256;
-const TAG_FID: u16 = 257;
-const TAG_FE: u16 = 260;
+pub const TAG_AVDP: u16 = 2;
+pub const TAG_PD: u16 = 5;
+pub const TAG_LVD: u16 = 6;
+pub const TAG_TERM: u16 = 8;
+pub const TAG_FSD: u16 = 256;
+pub const TAG_FID: u16 = 257;
+pub const TAG_FE: u16 = 260;
 /// Some UDF implementations (e.g. older genisoimage) write 261 for File Entry.
-const TAG_FE_ALT: u16 = 261;
-const TAG_EFE: u16 = 266;
+pub const TAG_FE_ALT: u16 = 261;
+pub const TAG_EFE: u16 = 266;
 
 // FID File Characteristics bits
 const FC_DIRECTORY: u8 = 0x02;
@@ -63,7 +57,7 @@ const EXTENT_RECORDED: u32 = 0x0000_0000; // 0b00 in bits 30-31
 // ── Logical block size ────────────────────────────────────────────────────────
 
 /// Largest logical block size we read into a stack sector buffer.
-const MAX_BLOCK_SIZE: usize = 4096;
+pub const MAX_BLOCK_SIZE: usize = 4096;
 
 /// Candidate UDF logical block sizes, most-common first. Optical media (CD/DVD/
 /// BD) use 2048; hard-disk and USB UDF use 512; Advanced-Format media use 4096.
@@ -882,7 +876,7 @@ fn seek_read<R: Read + Seek>(reader: &mut R, byte_pos: u64, buf: &mut [u8]) -> O
 
 /// Seek to `byte_pos` and read exactly `buf.len()` bytes, propagating the real
 /// [`io::Error`] (a truncated image yields [`io::ErrorKind::UnexpectedEof`]).
-fn seek_read_checked<R: Read + Seek>(
+pub fn seek_read_checked<R: Read + Seek>(
     reader: &mut R,
     byte_pos: u64,
     buf: &mut [u8],
@@ -896,7 +890,7 @@ fn seek_read_checked<R: Read + Seek>(
 
 /// The ECMA-167 descriptor-tag checksum (3/7.2): the mod-256 sum of the 16 tag
 /// bytes excluding byte 4 (the checksum field itself).
-pub(crate) fn tag_checksum(tag: &[u8]) -> u8 {
+pub fn tag_checksum(tag: &[u8]) -> u8 {
     let mut sum: u32 = 0;
     for (i, &b) in tag.iter().take(16).enumerate() {
         if i == 4 {
@@ -910,7 +904,7 @@ pub(crate) fn tag_checksum(tag: &[u8]) -> u8 {
 /// The ECMA-167 descriptor CRC (3/7.2): CRC-CCITT with polynomial `0x1021`,
 /// initial value `0x0000`, no input/output reflection and no final XOR,
 /// computed over the descriptor body (the bytes after the 16-byte tag).
-pub(crate) fn ecma167_crc(body: &[u8]) -> u16 {
+pub fn ecma167_crc(body: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for &b in body {
         crc ^= u16::from(b) << 8;
@@ -928,7 +922,7 @@ pub(crate) fn ecma167_crc(body: &[u8]) -> u16 {
 /// Human-readable label for a descriptor tag identifier, or `None` for an
 /// identifier this crate does not recognise (so the caller does not validate a
 /// non-descriptor sector).
-pub(crate) fn descriptor_label(tag_ident: u16) -> Option<&'static str> {
+pub fn descriptor_label(tag_ident: u16) -> Option<&'static str> {
     Some(match tag_ident {
         TAG_AVDP => "AVDP",
         TAG_PD => "PartitionDescriptor",
@@ -976,7 +970,7 @@ pub(crate) fn decode_timestamp(b: &[u8]) -> Option<String> {
 /// Read the File Set Descriptor's recording time (4/14.1, offset 16) from the
 /// FSD at `fsd_lba`. `Ok(None)` when the sector is not an FSD or the time is
 /// unset.
-pub(crate) fn fsd_recording_time<R: Read + Seek>(
+pub fn fsd_recording_time<R: Read + Seek>(
     reader: &mut R,
     block_size: u32,
     fsd_lba: u32,
@@ -993,7 +987,7 @@ pub(crate) fn fsd_recording_time<R: Read + Seek>(
 /// The Modification Time of a File Entry sector (`is_efe` selects the Extended
 /// File Entry layout, whose extra Object Size + Creation Time fields shift the
 /// timestamps): base FE modification time is at offset 84, EFE at offset 92.
-pub(crate) fn fe_modification_time(sector: &[u8], is_efe: bool) -> Option<String> {
+pub fn fe_modification_time(sector: &[u8], is_efe: bool) -> Option<String> {
     let off = if is_efe { 92 } else { 84 };
     decode_timestamp(sector.get(off..off + 12)?)
 }
@@ -1006,7 +1000,7 @@ pub(crate) fn fe_modification_time(sector: &[u8], is_efe: bool) -> Option<String
 /// trailing slack (size is a whole-block multiple), is zero-length, has its data
 /// stored inline in the File Entry (no allocated block to hold slack), or its
 /// final block cannot be located/read.
-pub(crate) fn fe_slack_nonzero<R: Read + Seek>(
+pub fn fe_slack_nonzero<R: Read + Seek>(
     reader: &mut R,
     block_size: u32,
     partition_start: u32,
@@ -1109,7 +1103,7 @@ mod real_media_tests {
     use std::fs::File;
 
     fn state(name: &str) -> Option<super::UdfState> {
-        let path = format!("{}/tests/data/{}", env!("CARGO_MANIFEST_DIR"), name);
+        let path = format!("{}/../tests/data/{}", env!("CARGO_MANIFEST_DIR"), name);
         let mut f = File::open(&path).ok()?;
         parse_udf_state(&mut f)
     }
@@ -1199,7 +1193,7 @@ mod real_media_tests {
     /// detected from the medium rather than assumed to be 2048.
     #[test]
     fn plain_512_block_image_parses_via_detected_block_size() {
-        let path = format!("{}/tests/data/udf_plain.img", env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{}/../tests/data/udf_plain.img", env!("CARGO_MANIFEST_DIR"));
         let mut f = File::open(&path).expect("udf_plain.img fixture must be present");
         let st = super::parse_udf_state(&mut f)
             .expect("512-byte-block UDF must parse once the block size is detected from the AVDP");

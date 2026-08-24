@@ -1,47 +1,35 @@
-[package]
-name = "udf-forensic"
-version = "0.2.8"
+[workspace]
+resolver = "2"
+members = ["core", "forensic"]
+
+# Single source of truth for fields shared by both members (DRY): the reader
+# (`udf-core`) and the analyzer (`udf-forensic`) publish independently but share
+# edition, license, MSRV floor, repository metadata and the lint posture.
+[workspace.package]
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
-description = "Forensic-grade, from-scratch UDF (ECMA-167 / OSTA) reader and tamper analyzer — volume recognition, partition maps (physical/virtual/sparable/metadata), File Entry and directory (FID) traversal, file data, plus graded findings (tag CRC/checksum, orphan File Entries, slack, file-after-volume) over any Read + Seek source"
 repository = "https://github.com/SecurityRonin/udf-forensic"
 homepage = "https://github.com/SecurityRonin/udf-forensic"
-documentation = "https://docs.rs/udf-forensic"
 readme = "README.md"
-keywords = ["forensics", "udf", "ecma-167", "filesystem", "dfir"]
-categories = ["parser-implementations", "filesystem"]
-# Real mkudffs-authored UDF images used only by the in-crate real_media_tests;
-# they are committed for reproducible local validation but must not bloat the
-# published crate (downstream consumers never run these tests).
-exclude = ["tests/data/*.img"]
 
-[features]
-serde = ["dep:serde", "forensicnomicon/serde"]
-# Adapt `UdfState` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`) so a
-# UDF volume composes as `Arc<dyn FileSystem>` in the forensic-vfs engine.
-vfs = ["dep:forensic-vfs"]
-
-[dependencies]
+[workspace.dependencies]
+udf-core = { version = "0.1.0", path = "core" }
 forensicnomicon = "1"
 # The fleet's single audited bounds-checked integer reader (no_std, forbid(unsafe),
-# fuzzed): fixed-width reads return 0 out of range instead of panicking. This
-# untrusted-input parser routes every fixed-width read through it rather than
-# re-deriving a per-crate bytes.rs.
+# fuzzed): fixed-width reads return 0 out of range instead of panicking.
 safe-read = "0.1"
-serde = { version = "1", optional = true, features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 # forensic-vfs (KNOWLEDGE leaf) — the read-only FileSystem navigation contract.
-# Optional so a bare reader stays dependency-light; the `vfs` feature turns on
-# the adapter.
-forensic-vfs = { version = "0.9", optional = true }
+forensic-vfs = { version = "0.9" }
 
-[lints.rust]
+# The full fleet base tier, shared by both members. Both parse untrusted,
+# attacker-controllable UDF images, so an unwrap/expect in production is a
+# denial-of-service panic vector.
+[workspace.lints.rust]
 unsafe_code = "forbid"
 
-[lints.clippy]
-# Full fleet base tier (the panic-free denies plus clippy::pedantic). This parser
-# reads untrusted, attacker-controllable UDF images, so an unwrap/expect in
-# production is a denial-of-service panic vector.
+[workspace.lints.clippy]
 all                      = { level = "warn", priority = -1 }
 pedantic                 = { level = "warn", priority = -1 }
 correctness              = { level = "deny", priority = -1 }

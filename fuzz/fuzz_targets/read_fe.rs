@@ -22,5 +22,5 @@ fuzz_target!(|data: &[u8]| {
     let fe_lba = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
     let image = &rest[8..];
     let _ =
-        udf_forensic::read_fe_data(&mut Cursor::new(image), block_size, partition_start, fe_lba);
+        udf_core::read_fe_data(&mut Cursor::new(image), block_size, partition_start, fe_lba);
 });
