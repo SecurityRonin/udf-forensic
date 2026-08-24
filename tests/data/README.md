@@ -139,6 +139,50 @@ on any udftools 2.3 host.
   own author), cross-checked on macOS via `hdiutil attach` (shows `readme-link.txt ->
   ../README.txt`).
 
+#### udf_all_node_types.img — UDF 2.01, hd media, every non-regular node type
+
+- **Source:** the `udf_symlink` recipe extended so the image is a **superset** of it — the same
+  `README.txt`, `nested/file.txt` and `nested/readme-link.txt -> ../README.txt` tree, plus a
+  `nodes/` directory carrying one of every non-regular type the format can express. All five
+  were created by the Linux UDF driver on a loop mount (`ln -s`, `mknod`, `mkfifo`, and a
+  `bind()`ed `AF_UNIX` socket), so the ICB File Type bytes are the driver's own.
+- **Node types recorded (ECMA-167 4/14.6.6, ICB Tag File Type at File Entry offset 27):**
+
+  | path | ICB `file_type` | meaning |
+  |---|---|---|
+  | `nodes/symlink` | `0x0C` | symbolic link |
+  | `nodes/chardev` | `0x07` | character device (1, 3) |
+  | `nodes/blockdev` | `0x06` | block device (7, 0) |
+  | `nodes/fifo` | `0x09` | FIFO |
+  | `nodes/socket` | `0x0A` | socket |
+
+- **Generator command (verbatim), inside a privileged `ubuntu:24.04` container:**
+  ```sh
+  dd if=/dev/zero of=udf_all_node_types.img bs=1M count=8
+  mkudffs --media-type=hd --udfrev=0x0201 udf_all_node_types.img
+  # losetup + mount -t udf /dev/loopN /mnt/udf, then in /mnt/udf:
+  #   printf 'readme\n' > README.txt; mkdir nested
+  #   printf 'nested file\n' > nested/file.txt
+  #   ln -s ../README.txt nested/readme-link.txt
+  #   mkdir nodes && cd nodes
+  #   ln -s ../README.txt symlink
+  #   mknod chardev c 1 3 ; mknod blockdev b 7 0 ; mkfifo fifo
+  #   python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.bind('socket')"
+  ```
+  **`mknod` needs real `CAP_MKNOD`** — rootless podman cannot create device nodes even with
+  `--privileged` (the capability is namespaced; it fails on tmpfs too, which is the tell). On
+  macOS run the container rootful inside the VM: `podman machine ssh 'sudo podman run …'`.
+  The container's `/dev` also carries only `loop0`, so materialize more before `losetup -f`.
+- **Size / MD5:** 8 388 608 bytes - `350ce39ff0208e1583f96460d37654d9`
+- **Ground truth:** the Linux UDF driver's own readback after remount lists `b`, `c`, `p`, `s`
+  and `l` for the five nodes and resolves the legacy symlink to `../README.txt`; the ICB
+  `file_type` histogram was independently confirmed by reading File Entry offset 27 directly
+  (`0x04 ×3, 0x05 ×2, 0x06, 0x07, 0x09, 0x0A, 0x0C ×2`).
+- **Classification:** Tier 2 — real `mkudffs` + kernel-driver output, ground truth from the
+  driver's own resolution, but the scenario (which nodes exist) was chosen here.
+- **Consumed by:** `vfs.rs` `mod tests::every_non_regular_node_type_is_classified`, and by the
+  fuzz corpus (all `tests/data/*.img` are seeded into every fuzz target).
+
 ## Reproducing the corpus on a non-Linux host
 
 `mkudffs`/`udfinfo` are Linux-only. On macOS, mint via a rootless Linux container (no VM SSH needed):

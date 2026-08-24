@@ -6,3 +6,4 @@ target/
 !tests/data/udf_spar.img
 !tests/data/udf_plain.img
 !tests/data/udf_symlink.img
+!tests/data/udf_all_node_types.img

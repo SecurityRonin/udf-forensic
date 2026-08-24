@@ -48,15 +48,51 @@ use forensic_vfs::{
 };
 
 use crate::{
-    read_dir_at_lba, read_fe_data, read_fe_file_type, UdfState, FILE_TYPE_DIRECTORY, FILE_TYPE_LINK,
+    read_dir_at_lba, read_fe_data, read_fe_file_type, UdfState, FILE_TYPE_BLOCK_DEVICE,
+    FILE_TYPE_CHAR_DEVICE, FILE_TYPE_DIRECTORY, FILE_TYPE_FIFO, FILE_TYPE_LINK, FILE_TYPE_SOCKET,
 };
+
+/// The node kind an ECMA-167 ICB Tag File Type denotes (4/14.6.6).
+///
+/// A type this reader does not recognize is [`NodeKind::Other`] rather than
+/// [`NodeKind::File`]: "the format said something we do not model" and "the
+/// format said regular file" are different observations, and collapsing them
+/// would fabricate the second.
+#[cfg(feature = "vfs")]
+fn kind_of_file_type(file_type: u8) -> NodeKind {
+    match file_type {
+        FILE_TYPE_DIRECTORY => NodeKind::Dir,
+        crate::FILE_TYPE_REGULAR => NodeKind::File,
+        FILE_TYPE_LINK => NodeKind::Symlink,
+        FILE_TYPE_CHAR_DEVICE => NodeKind::CharDevice,
+        FILE_TYPE_BLOCK_DEVICE => NodeKind::BlockDevice,
+        FILE_TYPE_FIFO => NodeKind::Fifo,
+        FILE_TYPE_SOCKET => NodeKind::Socket,
+        _ => NodeKind::Other,
+    }
+}
+
+/// The most a File Identifier Descriptor alone can say about a child's kind.
+///
+/// A FID records only a directory characteristic bit, so a non-directory child
+/// whose own File Entry could not be read is genuinely **unclassified** — it is
+/// not evidence of a regular file. Reporting [`NodeKind::Other`] keeps "we could
+/// not read the record" distinct from "the record said regular file".
+#[cfg(feature = "vfs")]
+fn kind_from_fid_only(is_dir: bool) -> NodeKind {
+    if is_dir {
+        NodeKind::Dir
+    } else {
+        NodeKind::Other
+    }
+}
 
 /// Per-node metadata harvested from a parent File Identifier Descriptor and
 /// cached by File Entry LBA.
 #[derive(Clone, Copy)]
 struct FeMeta {
     is_dir: bool,
-    is_symlink: bool,
+    kind: NodeKind,
     size: u64,
 }
 
@@ -94,7 +130,7 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
             state.root_fe_lba,
             FeMeta {
                 is_dir: true,
-                is_symlink: false,
+                kind: NodeKind::Dir,
                 size: 0,
             },
         );
@@ -150,12 +186,11 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
         match read_fe_file_type(&mut inner.reader, block_size, fe_lba) {
             Some(ft) => {
                 let is_dir = ft == FILE_TYPE_DIRECTORY;
-                let is_symlink = ft == FILE_TYPE_LINK;
                 let size =
                     crate::read_fe_info_len(&mut inner.reader, block_size, fe_lba).unwrap_or(0);
                 let m = FeMeta {
                     is_dir,
-                    is_symlink,
+                    kind: kind_of_file_type(ft),
                     size,
                 };
                 inner.cache.insert(fe_lba, m);
@@ -205,12 +240,14 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
             let meta = match read_fe_file_type(&mut inner.reader, block_size, c.fe_lba) {
                 Some(ft) => FeMeta {
                     is_dir: ft == FILE_TYPE_DIRECTORY,
-                    is_symlink: ft == FILE_TYPE_LINK,
+                    kind: kind_of_file_type(ft),
                     size: c.size,
                 },
+                // The child's File Entry sector could not be read: fall back to
+                // the FID's directory bit, which is all the parent records.
                 None => FeMeta {
                     is_dir: c.is_dir,
-                    is_symlink: false,
+                    kind: kind_from_fid_only(c.is_dir),
                     size: c.size,
                 },
             };
@@ -254,13 +291,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
                 Ok(VfsDirEntry {
                     name: c.name.into_bytes(),
                     id: FileId::Opaque(u64::from(c.fe_lba)),
-                    kind: if meta.is_dir {
-                        NodeKind::Dir
-                    } else if meta.is_symlink {
-                        NodeKind::Symlink
-                    } else {
-                        NodeKind::File
-                    },
+                    kind: meta.kind,
                 })
             })
             .collect();
@@ -308,13 +339,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
         let m = Self::resolve(&mut inner, fe_lba, block_size)?;
         Ok(FsMeta {
             ino: u64::from(fe_lba),
-            kind: if m.is_dir {
-                NodeKind::Dir
-            } else if m.is_symlink {
-                NodeKind::Symlink
-            } else {
-                NodeKind::File
-            },
+            kind: m.kind,
             allocated: Allocation::Allocated,
             size: m.size,
             nlink: 1,
@@ -366,7 +391,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
         let partition_start = self.state.partition_start;
         let mut inner = self.lock();
         let meta = Self::resolve(&mut inner, fe_lba, block_size)?;
-        if !meta.is_symlink {
+        if meta.kind != NodeKind::Symlink {
             // Not a symlink: empty target, not a per-node error (the contract
             // for non-link nodes).
             return Ok(Vec::new());
@@ -462,6 +487,179 @@ mod tests {
             fs.read_link(link.id, 4096).is_err(),
             "unreadable symlink data must be loud"
         );
+    }
+
+    #[test]
+    fn a_child_whose_file_entry_is_unreadable_is_unclassified_not_a_file() {
+        // Truncating the image below the last two File Entries leaves the
+        // directory listing intact but makes those children's own records
+        // unreachable. The reader must then say Other — "we could not read the
+        // record" — rather than File, which would assert something the volume
+        // never stated.
+        //
+        // File Entry offsets in this fixture: nodes/ 137216, symlink 137728,
+        // chardev 138240, blockdev 138752, fifo 139264, socket 139776.
+        let path = format!(
+            "{}/tests/data/udf_all_node_types.img",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        // The fixture is committed, not gitignored, so its absence is a failure
+        // rather than a reason to skip.
+        let full = std::fs::read(&path).expect("udf_all_node_types.img committed");
+        let fs = UdfVfs::open(Cursor::new(full[..139_000].to_vec()))
+            .expect("truncated image still mounts");
+        let nodes = fs
+            .read_dir(fs.root())
+            .expect("root read_dir")
+            .filter_map(Result::ok)
+            .find(|e| e.name == b"nodes")
+            .map(|e| e.id)
+            .expect("nodes/ still listed");
+        let kinds: Vec<_> = fs
+            .read_dir(nodes)
+            .expect("nodes read_dir")
+            .filter_map(Result::ok)
+            .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.kind))
+            .collect();
+        for (name, kind) in &kinds {
+            if name == "fifo" || name == "socket" {
+                assert_eq!(
+                    *kind,
+                    NodeKind::Other,
+                    "{name}: File Entry past EOF must read as unclassified"
+                );
+            }
+        }
+        // The children whose File Entries survive still classify normally, so
+        // the fallback is scoped to the unreadable ones rather than poisoning
+        // the whole listing.
+        assert!(
+            kinds
+                .iter()
+                .any(|(n, k)| n == "chardev" && *k == NodeKind::CharDevice),
+            "a readable child still classifies: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn a_fid_alone_cannot_classify_a_non_directory() {
+        // The FID records one bit. A directory is knowable from it; anything
+        // else is unclassified, and must not be reported as a regular file.
+        assert_eq!(kind_from_fid_only(true), NodeKind::Dir);
+        assert_eq!(kind_from_fid_only(false), NodeKind::Other);
+    }
+
+    #[test]
+    fn icb_file_type_maps_to_its_node_kind() {
+        // The whole ECMA-167 4/14.6.6 mapping, including the arms the fixture
+        // cannot reach.
+        for (ft, want) in [
+            (FILE_TYPE_DIRECTORY, NodeKind::Dir),
+            (crate::FILE_TYPE_REGULAR, NodeKind::File),
+            (FILE_TYPE_BLOCK_DEVICE, NodeKind::BlockDevice),
+            (FILE_TYPE_CHAR_DEVICE, NodeKind::CharDevice),
+            (FILE_TYPE_FIFO, NodeKind::Fifo),
+            (FILE_TYPE_SOCKET, NodeKind::Socket),
+            (FILE_TYPE_LINK, NodeKind::Symlink),
+        ] {
+            assert_eq!(kind_of_file_type(ft), want, "file_type 0x{ft:02x}");
+        }
+        // A type this reader does not model reads as Other, never File —
+        // "the format said something we do not model" and "the format said
+        // regular file" are different observations. 0x00 is unspecified, 0x03
+        // an indirect entry, 0x08 extended attributes, 0x0B a terminal entry
+        // and 0x0D a stream directory: all real ECMA-167 types, none a node
+        // kind this trait models.
+        for ft in [0x00, 0x01, 0x02, 0x03, 0x08, 0x0b, 0x0d, 0xff] {
+            assert_eq!(
+                kind_of_file_type(ft),
+                NodeKind::Other,
+                "unmodelled file_type 0x{ft:02x} must not read as File"
+            );
+        }
+    }
+
+    #[test]
+    fn every_non_regular_node_type_is_classified() {
+        // UDF records the node type in one ICB byte (ECMA-167 4/14.6.6, and
+        // the kernel's fs/udf/ecma_167.h):
+        //
+        //   0x06 BLOCK   0x07 CHAR   0x09 FIFO   0x0A SOCKET   0x0C SYMLINK
+        //
+        // so an adapter that collapses them into `File` is discarding a fact
+        // the format states plainly. `udf_all_node_types.img` carries one of
+        // each, created by the Linux UDF driver via mknod/mkfifo/bind.
+        let path = format!(
+            "{}/tests/data/udf_all_node_types.img",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let Ok(f) = File::open(&path) else {
+            eprintln!("skip: udf_all_node_types.img fixture absent");
+            return;
+        };
+        let Ok(fs) = UdfVfs::open(f) else {
+            eprintln!("skip: udf_all_node_types.img did not mount");
+            return;
+        };
+        let root = fs.root();
+        let root_children: Vec<_> = fs
+            .read_dir(root)
+            .expect("root read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        let nodes = root_children
+            .iter()
+            .find(|e| e.name == b"nodes")
+            .expect("nodes dir present");
+        assert_eq!(nodes.kind, NodeKind::Dir);
+
+        let children: Vec<_> = fs
+            .read_dir(nodes.id)
+            .expect("nodes read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        for (name, want) in [
+            (&b"symlink"[..], NodeKind::Symlink),
+            (&b"chardev"[..], NodeKind::CharDevice),
+            (&b"blockdev"[..], NodeKind::BlockDevice),
+            (&b"fifo"[..], NodeKind::Fifo),
+            (&b"socket"[..], NodeKind::Socket),
+        ] {
+            let e = children
+                .iter()
+                .find(|e| e.name == name)
+                .expect("every node type present under nodes/");
+            assert_eq!(
+                e.kind,
+                want,
+                "read_dir kind for {}",
+                String::from_utf8_lossy(name)
+            );
+            // meta() must agree with read_dir(): the same node cannot be two
+            // different kinds depending on how it was reached.
+            assert_eq!(
+                fs.meta(e.id).expect("meta").kind,
+                want,
+                "meta kind for {}",
+                String::from_utf8_lossy(name)
+            );
+            // read_link is for link targets. Only the symlink has one; a
+            // device, FIFO or socket must read as empty rather than as an
+            // error or a fabricated path.
+            let target = fs.read_link(e.id, 4096).expect("read_link");
+            if want == NodeKind::Symlink {
+                assert_eq!(
+                    target, b"../README.txt",
+                    "the symlink's target is the driver's own resolution"
+                );
+            } else {
+                assert!(
+                    target.is_empty(),
+                    "{} carries no link target",
+                    String::from_utf8_lossy(name)
+                );
+            }
+        }
     }
 
     #[test]
