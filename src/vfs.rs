@@ -465,6 +465,73 @@ mod tests {
     }
 
     #[test]
+    fn every_non_regular_node_type_is_classified() {
+        // UDF records the node type in one ICB byte (ECMA-167 4/14.6.6, and
+        // the kernel's fs/udf/ecma_167.h):
+        //
+        //   0x06 BLOCK   0x07 CHAR   0x09 FIFO   0x0A SOCKET   0x0C SYMLINK
+        //
+        // so an adapter that collapses them into `File` is discarding a fact
+        // the format states plainly. `udf_all_node_types.img` carries one of
+        // each, created by the Linux UDF driver via mknod/mkfifo/bind.
+        let path = format!(
+            "{}/tests/data/udf_all_node_types.img",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let Ok(f) = File::open(&path) else {
+            eprintln!("skip: udf_all_node_types.img fixture absent");
+            return;
+        };
+        let Ok(fs) = UdfVfs::open(f) else {
+            eprintln!("skip: udf_all_node_types.img did not mount");
+            return;
+        };
+        let root = fs.root();
+        let root_children: Vec<_> = fs
+            .read_dir(root)
+            .expect("root read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        let nodes = root_children
+            .iter()
+            .find(|e| e.name == b"nodes")
+            .expect("nodes dir present");
+        assert_eq!(nodes.kind, NodeKind::Dir);
+
+        let children: Vec<_> = fs
+            .read_dir(nodes.id)
+            .expect("nodes read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        for (name, want) in [
+            (&b"symlink"[..], NodeKind::Symlink),
+            (&b"chardev"[..], NodeKind::CharDevice),
+            (&b"blockdev"[..], NodeKind::BlockDevice),
+            (&b"fifo"[..], NodeKind::Fifo),
+            (&b"socket"[..], NodeKind::Socket),
+        ] {
+            let e = children
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("{} present", String::from_utf8_lossy(name)));
+            assert_eq!(
+                e.kind,
+                want,
+                "read_dir kind for {}",
+                String::from_utf8_lossy(name)
+            );
+            // meta() must agree with read_dir(): the same node cannot be two
+            // different kinds depending on how it was reached.
+            assert_eq!(
+                fs.meta(e.id).expect("meta").kind,
+                want,
+                "meta kind for {}",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    #[test]
     fn udf_symlink_surfaces_as_symlink_with_target() {
         // The committed udf_symlink.img carries a real Linux-driver-authored
         // PATH_COMPONENT symlink; the patched adapter must classify it and
