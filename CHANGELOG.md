@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8](https://github.com/SecurityRonin/udf-forensic/compare/udf-forensic-v0.2.7...udf-forensic-v0.2.8) - 2026-08-24
+
+### Added
+
+- *(vfs)* decode UDF PATH_COMPONENT symlinks
+
+### Documentation
+
+- *(vfs)* stop linking public docs at a private decoder
+- *(vfs)* type-1 agreed-location semantics match the kernel break
+
+### Fixed
+
+- *(vfs)* bound a decoded symlink target by the caller's cap
+- *(vfs)* walk PATH_COMPONENT records the way udf_pc_to_char does
+- *(gitignore)* unanchor the target rule so nested cargo projects are ignored
+
 ## [0.2.7](https://github.com/SecurityRonin/udf-forensic/compare/udf-forensic-v0.2.6...udf-forensic-v0.2.7) - 2026-08-08
 
 ### Documentation
