@@ -2,7 +2,14 @@
 
 Date: 2026-07-24
 
-Status: Accepted
+Status: Superseded by [ADR-0010](0010-split-udf-core-reader-from-forensic-analyzer.md)
+
+> **Superseded 2026-08-24.** The trigger this ADR named for revisiting — a
+> reader-only consumer that wants the reader without `forensicnomicon` — has
+> materialized (`forensic-vfs-engine` and an external archiver). ADR-0010 splits
+> the reader into `udf-core` while keeping `udf-forensic` source-compatible via a
+> facade re-export. The reasoning below is preserved as the record of why the
+> crate was single until then.
 
 ## Context
 

@@ -10,10 +10,22 @@ Reads the UDF filesystem on DVD, Blu-ray, and packet-written optical media, with
 
 ## Install
 
+Two crates. Pick by what you need:
+
 ```toml
 [dependencies]
-udf-forensic = "0.1"
+# Just read UDF volumes (mount adapter, archiver): the lean reader — one
+# dependency, no forensic report model, low MSRV.
+udf-core = "0.1"
+
+# Read AND grade (tag CRC/checksum, slack, file-after-volume): the analyzer,
+# which re-exports the full reader so `udf_forensic::…` paths keep working.
+udf-forensic = "0.2"
 ```
+
+`udf-forensic` is a drop-in for the reader too — it re-exports every `udf-core`
+type, so existing `udf_forensic::detect_udf` / `udf_forensic::UdfState` /
+`udf_forensic::vfs::UdfVfs` code needs no change.
 
 ## Quick start
 

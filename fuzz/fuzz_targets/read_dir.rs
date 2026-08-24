@@ -20,7 +20,7 @@ fuzz_target!(|data: &[u8]| {
     let partition_start = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
     let dir_fe_lba = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
     let image = &rest[8..];
-    let _ = udf_forensic::read_dir_at_lba(
+    let _ = udf_core::read_dir_at_lba(
         &mut Cursor::new(image),
         block_size,
         partition_start,

@@ -23,16 +23,18 @@ use std::io::Cursor;
 
 /// libFuzzer `parse_state` reproducer: overflowed `partition_start + fsd_lbn`
 /// while resolving the File Set Descriptor location.
-const PARSE_STATE_CRASH: &[u8] = include_bytes!("data/fuzz-crash-parse_state-add-overflow.bin");
+const PARSE_STATE_CRASH: &[u8] =
+    include_bytes!("../../tests/data/fuzz-crash-parse_state-add-overflow.bin");
 
 /// libFuzzer `read_dir` reproducer: overflowed `partition_start + icb_lbn`
 /// while walking a directory's File Identifier Descriptors.
-const READ_DIR_CRASH: &[u8] = include_bytes!("data/fuzz-crash-read_dir-add-overflow.bin");
+const READ_DIR_CRASH: &[u8] =
+    include_bytes!("../../tests/data/fuzz-crash-read_dir-add-overflow.bin");
 
 #[test]
 fn parse_state_reproducer_does_not_panic() {
-    let _ = udf_forensic::parse_udf_state_checked(&mut Cursor::new(PARSE_STATE_CRASH));
-    let _ = udf_forensic::parse_udf_state(&mut Cursor::new(PARSE_STATE_CRASH));
+    let _ = udf_core::parse_udf_state_checked(&mut Cursor::new(PARSE_STATE_CRASH));
+    let _ = udf_core::parse_udf_state(&mut Cursor::new(PARSE_STATE_CRASH));
 }
 
 /// The `read_dir` harness steers addressing from the leading bytes rather than
@@ -50,7 +52,7 @@ fn read_dir_reproducer_does_not_panic() {
     let partition_start = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
     let dir_fe_lba = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
 
-    let _ = udf_forensic::read_dir_at_lba(
+    let _ = udf_core::read_dir_at_lba(
         &mut Cursor::new(&rest[8..]),
         block_size,
         partition_start,

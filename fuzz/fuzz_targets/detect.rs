@@ -5,5 +5,5 @@ use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = udf_forensic::detect_udf(&mut Cursor::new(data));
+    let _ = udf_core::detect_udf(&mut Cursor::new(data));
 });

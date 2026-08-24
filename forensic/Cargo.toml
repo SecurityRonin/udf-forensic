@@ -1,0 +1,27 @@
+[package]
+name = "udf-forensic"
+version = "0.2.8"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Forensic-grade UDF (ECMA-167 / OSTA) tamper analyzer — graded findings (tag CRC/checksum, orphan File Entries, slack, file-after-volume) over the udf-core reader. Re-exports the full reader surface for source compatibility."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/udf-forensic"
+readme.workspace = true
+keywords = ["forensics", "udf", "ecma-167", "filesystem", "dfir"]
+categories = ["parser-implementations", "filesystem"]
+
+[features]
+serde = ["dep:serde", "udf-core/serde", "forensicnomicon/serde"]
+# Forward the reader's vfs adapter so `udf-forensic = { features = ["vfs"] }`
+# keeps working exactly as before the core/forensic split.
+vfs = ["udf-core/vfs"]
+
+[dependencies]
+udf-core = { workspace = true }
+forensicnomicon = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[lints]
+workspace = true

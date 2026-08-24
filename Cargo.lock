@@ -138,13 +138,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "udf-core"
+version = "0.1.0"
+dependencies = [
+ "forensic-vfs",
+ "safe-read",
+ "serde",
+]
+
+[[package]]
 name = "udf-forensic"
 version = "0.2.8"
 dependencies = [
- "forensic-vfs",
  "forensicnomicon",
- "safe-read",
  "serde",
+ "udf-core",
 ]
 
 [[package]]
