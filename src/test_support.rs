@@ -26,6 +26,7 @@ pub(crate) const SHORT_FILE_FE: u32 = 7;
 pub(crate) const LONG_FILE_FE: u32 = 10;
 pub(crate) const UTF16_FILE_FE: u32 = 12;
 pub(crate) const BROKEN_DIR_FE: u32 = 13;
+pub(crate) const SYMLINK_FE: u32 = 14;
 
 /// Information Length of the short-extent file (600 B ⇒ two 512-B blocks).
 pub(crate) const SHORT_FILE_LEN: u64 = 600;
@@ -141,10 +142,40 @@ pub(crate) fn image() -> Vec<u8> {
     dir.extend_from_slice(&fid(LONG_FILE_FE, false, false, b"\x08long.bin"));
     dir.extend_from_slice(&fid(UTF16_FILE_FE, false, false, &[16, 0x00, b'U'])); // UTF-16BE "U"
     dir.extend_from_slice(&fid(BROKEN_DIR_FE, true, false, b"\x08bd"));
-    stamp_fe(&mut img, ROOT_FE, 4, 3, dir.len() as u64, &dir);
+    dir.extend_from_slice(&fid(SYMLINK_FE, false, false, b"\x08lnk"));
+    // The root directory no longer fits the File Entry's inline area, so it
+    // lives in its own block (LBA 15) behind a short allocation descriptor.
+    let root_dir_block = 15u32;
+    img[root_dir_block as usize * BS..root_dir_block as usize * BS + dir.len()]
+        .copy_from_slice(&dir);
+    stamp_fe(
+        &mut img,
+        ROOT_FE,
+        4,
+        0,
+        dir.len() as u64,
+        &short_ad(dir.len() as u32, root_dir_block),
+    );
 
     // Subdirectory File Entry @5: an empty inline directory.
     stamp_fe(&mut img, SUBDIR_FE, 4, 3, 0, &[]);
+
+    // Symlink File Entry @14: ICB file type 0x0c with an inline PATH_COMPONENT
+    // record chain for "../README.txt" (the exact byte layout the Linux UDF
+    // driver writes; see tests/data/README.md).
+    let symlink_data: [u8; 19] = [
+        0x03, 0x00, 0x00, 0x00, // type 3 (".."), len 0, version 0
+        0x05, 0x0b, 0x00, 0x00, // type 5 (name), len 11, version 0
+        0x08, b'R', b'E', b'A', b'D', b'M', b'E', b'.', b't', b'x', b't',
+    ];
+    stamp_fe(
+        &mut img,
+        SYMLINK_FE,
+        0x0c,
+        3,
+        symlink_data.len() as u64,
+        &symlink_data,
+    );
 
     // Inline file File Entry @6: 4 bytes stored in the ICB.
     stamp_fe(&mut img, INLINE_FILE_FE, 5, 3, 4, b"abcd");

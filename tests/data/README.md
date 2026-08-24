@@ -118,6 +118,27 @@ on any udftools 2.3 host.
   type=PSPACE`). Together with the 2048-byte `vat`/`spar` images it exercises block-size detection across
   two media sector sizes.
 
+#### udf_symlink.img — UDF 2.01, hd media, populated with a symlink
+
+- **Source:** the `udf_plain` recipe (UDF 2.01, hd media, 512-byte blocks) populated via a
+  Linux loop mount: a small payload tree (`README.txt`, `nested/file.txt`) plus a symlink
+  `nested/readme-link.txt -> ../README.txt` created by the Linux UDF driver (`cp -a`), which
+  stores it as an ECMA-167 4/14.16.2 PATH_COMPONENT record chain (4-byte records: type,
+  length, `__le16 componentFileVersionNum`). The kernel struct is stable across v6.6–v6.14.
+- **Generator command (verbatim), inside a privileged `ubuntu:24.04` container:**
+  ```sh
+  dd if=/dev/zero of=udf_symlink.img bs=1M count=8
+  mkudffs --media-type=hd --udfrev=0x0201 udf_symlink.img
+  # losetup + mount -t udf, then: cp -a src/. /mnt/udf/   (src contains the symlink)
+  ```
+- **Size / MD5:** 8 388 608 bytes - `7dff64a7729478cd609a8291840b0a94`
+- **Consumed by:** `vfs.rs` `mod tests::udf_symlink_surfaces_as_symlink_with_target` (the vfs
+  adapter's `NodeKind::Symlink` classification and `FileSystem::read_link` PATH_COMPONENT
+  decode), and by the fuzz corpus (all `tests/data/*.img` are seeded into every fuzz target).
+  Ground truth: the Linux UDF driver resolves the same record to `../README.txt` (the image's
+  own author), cross-checked on macOS via `hdiutil attach` (shows `readme-link.txt ->
+  ../README.txt`).
+
 ## Reproducing the corpus on a non-Linux host
 
 `mkudffs`/`udfinfo` are Linux-only. On macOS, mint via a rootless Linux container (no VM SSH needed):

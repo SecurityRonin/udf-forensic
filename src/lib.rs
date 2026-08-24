@@ -682,6 +682,10 @@ pub(crate) fn read_fe_file_type<R: Read + Seek>(
 #[cfg(feature = "vfs")]
 pub(crate) const FILE_TYPE_DIRECTORY: u8 = 4;
 
+/// ECMA-167 ICB Tag File Type for a symbolic link (4/14.6.6).
+#[cfg(feature = "vfs")]
+pub(crate) const FILE_TYPE_LINK: u8 = 0x0c;
+
 /// Collect data from short allocation descriptors (8 bytes each).
 fn read_extents_short<R: Read + Seek>(
     reader: &mut R,
@@ -775,6 +779,79 @@ fn decode_osta_cs0(bytes: &[u8]) -> String {
     } else {
         String::from_utf8_lossy(payload).into_owned()
     }
+}
+
+/// Decode a UDF symbolic link's `PATH_COMPONENT` record chain (ECMA-167
+/// 4/14.16.2, OSTA UDF 2.01 §2.2.8) into its target path, following the Linux
+/// kernel's `udf_pc_to_char` semantics (fs/udf/symlink.c):
+///
+/// - Record: `[componentType: u8, lengthComponentIdent: u8,
+///   componentFileVersionNum: u16le, componentIdent[length]]` — a 4-byte
+///   header (the kernel's `__le16 componentFileVersionNum`).
+/// - Type 1 (root): a non-empty record is a media-specific agreed location
+///   the originator and receiver must interpret. The kernel's `break` leaves
+///   the `switch`, not the loop, so it steps over the identifier and keeps
+///   walking; an empty record falls through to type 2 and writes `/`.
+/// - Type 2 (parent): resets the target to the root (`/`).
+/// - Type 3 (`..`): writes `../`.
+/// - Type 4 (`.`): writes `./`.
+/// - Type 5 (name): an OSTA CS0-encoded identifier (compression ID 8 or 16),
+///   followed by `/`.
+/// - Unknown types: the kernel's `switch` has no `default:` arm, so only the
+///   4-byte header is consumed and the identifier bytes are read as the next
+///   record header. Skipping the identifier too would resynchronize the walk
+///   differently from the mount, which is the ground truth to reproduce.
+///
+/// The trailing separator is trimmed (the kernel's `p[-1] = '\0'`), so
+/// `..` + `README.txt` yields `../README.txt`. Hostile record chains cannot
+/// panic: out-of-range lengths stop the walk at the buffer end.
+pub fn decode_symlink_target(data: &[u8]) -> String {
+    let mut out = String::new();
+    let mut elen = 0usize;
+    while elen + 4 <= data.len() {
+        let component_type = data[elen];
+        let length = data[elen + 1] as usize;
+        let ident_start = elen + 4;
+        elen += 4;
+        match component_type {
+            // Root: an agreed media-specific location carries a non-empty
+            // identifier that the originator/receiver must interpret. The
+            // kernel steps over that identifier and continues the walk (its
+            // `break` exits the switch, not the loop), so the components that
+            // follow are still decoded. An empty root record falls through to
+            // the parent semantics (`case 1` falls into `case 2`): the output
+            // resets to an absolute root.
+            1 if length > 0 => {
+                elen += length;
+            }
+            // Parent: reset to the root (an empty root record falls through to
+            // the same behavior in the kernel).
+            1 | 2 => {
+                out.clear();
+                out.push('/');
+            }
+            3 => out.push_str("../"),
+            4 => out.push_str("./"),
+            5 => {
+                if length > 0 && ident_start + length <= data.len() {
+                    out.push_str(&decode_osta_cs0(&data[ident_start..ident_start + length]));
+                }
+                out.push('/');
+                elen += length;
+            }
+            // An unrecognized type matches no arm of the kernel's switch, and
+            // it has no `default:`, so the cursor advances by the header
+            // alone — the identifier bytes become the next record header.
+            _ => {}
+        }
+        if elen > data.len() {
+            break;
+        }
+    }
+    if out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    out
 }
 
 /// Seek to `byte_pos` and read exactly `buf.len()` bytes; returns `None` on any error.
@@ -1413,8 +1490,9 @@ mod synth_traversal_tests {
 
         let entries = read_dir_at_lba(&mut r, st.block_size, st.partition_start, st.root_fe_lba)
             .expect("root directory reads");
-        // The parent FID is skipped; the six real children are surfaced.
-        assert_eq!(entries.len(), 6, "entries: {entries:?}");
+        // The parent FID is skipped; the seven real children are surfaced
+        // (including the synthetic symlink).
+        assert_eq!(entries.len(), 7, "entries: {entries:?}");
         let by_name = |n: &str| entries.iter().find(|e| e.name == n);
 
         assert!(by_name("sub").expect("sub").is_dir);
@@ -1501,6 +1579,96 @@ mod synth_traversal_tests {
         assert_eq!(decode_osta_cs0(b"\x08hello"), "hello");
         // Compression id 16 = UTF-16BE.
         assert_eq!(decode_osta_cs0(&[16, 0x00, 0x41, 0x00, 0x42]), "AB");
+    }
+
+    #[test]
+    fn decode_symlink_target_relative_parent_and_name() {
+        // The exact bytes a Linux kernel (6.8) UDF driver wrote for a symlink
+        // whose target is "../README.txt" on a mkudffs 2.01 volume: a type-3
+        // ("..") record with an empty identifier, then a type-5 record holding
+        // an 11-byte CS0 name (compression id 8 + "README.txt"). Verified
+        // against `hdiutil attach` (macOS resolves it to "../README.txt").
+        let data = [
+            0x03, 0x00, 0x00, 0x00, // type 3 (".."), len 0, version 0
+            0x05, 0x0b, 0x00, 0x00, // type 5 (name), len 11, version 0
+            0x08, b'R', b'E', b'A', b'D', b'M', b'E', b'.', b't', b'x', b't',
+        ];
+        assert_eq!(decode_symlink_target(&data), "../README.txt");
+    }
+
+    #[test]
+    fn decode_symlink_target_absolute_utf16_and_empty() {
+        // Absolute: root (type 1) + UTF-16BE name (compression id 16).
+        let mut data = vec![
+            0x01, 0x00, 0x00, 0x00, 0x05, 0x05, 0x00, 0x00, 0x10, 0x00, 0x41, 0x00, 0x42,
+        ];
+        assert_eq!(decode_symlink_target(&data), "/AB");
+        // Empty chain and an all-garbage chain decode to empty, never panic.
+        assert_eq!(decode_symlink_target(&[]), "");
+        assert_eq!(decode_symlink_target(&[0x99, 0xff, 0x00, 0x00, 0x00]), "");
+        // A name record whose length overruns the buffer stops the walk.
+        data[5] = 0x7f;
+        assert_eq!(decode_symlink_target(&data), "/");
+    }
+
+    #[test]
+    fn decode_symlink_target_agreed_location_skips_ident_and_continues() {
+        // Type 1 with a non-empty identifier is a media-specific agreed
+        // location. The kernel's `break` leaves the *switch*, not the *while*:
+        //
+        //     case 1:
+        //         if (pc->lengthComponentIdent > 0) {
+        //             elen += pc->lengthComponentIdent;
+        //             break;          /* switch, not the loop */
+        //         }
+        //         fallthrough;
+        //
+        // so it steps over the identifier and keeps walking the chain
+        // (fs/udf/symlink.c). Aborting the whole walk would silently drop
+        // every component that follows — under-reporting a target rather than
+        // surfacing an error.
+        //
+        // Here: type 1 ident "AB", then a type-5 name "ab".
+        let data = [
+            0x01, 0x02, 0x00, 0x00, b'A', b'B', 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b',
+        ];
+        assert_eq!(decode_symlink_target(&data), "ab");
+        // Type 4 (".") writes "./"; the trailing slash is trimmed.
+        let data = [
+            0x04, 0x00, 0x00, 0x00, 0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b',
+        ];
+        assert_eq!(decode_symlink_target(&data), "./ab");
+        // A lone current-directory record trims to ".".
+        let data = [0x04, 0x00, 0x00, 0x00];
+        assert_eq!(decode_symlink_target(&data), ".");
+    }
+
+    #[test]
+    fn decode_symlink_target_unknown_type_advances_only_the_header() {
+        // The kernel's switch has no `default:` arm, so an unrecognized
+        // component type consumes only `sizeof(struct pathComponent)` (4
+        // bytes) and its identifier bytes are then read as the next record
+        // header. Skipping `lengthComponentIdent` as well would resynchronize
+        // the walk differently from the kernel, and the mount is the ground
+        // truth a forensic reader has to reproduce.
+        //
+        // Type 9 (unknown) declaring a 4-byte identifier whose bytes are
+        // themselves a well-formed type-4 (".") record.
+        let data = [0x09, 0x04, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00];
+        assert_eq!(
+            decode_symlink_target(&data),
+            ".",
+            "an unknown record advances four bytes, so its payload is the next header"
+        );
+    }
+
+    #[test]
+    fn decode_symlink_target_parent_resets_to_root() {
+        // Type 2 (parent) clears prior output and writes "/".
+        let data = [
+            0x05, 0x03, 0x00, 0x00, 0x08, b'a', b'b', 0x02, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(decode_symlink_target(&data), "/");
     }
 
     #[cfg(feature = "vfs")]
