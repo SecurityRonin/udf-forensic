@@ -795,8 +795,8 @@ fn decode_osta_cs0(bytes: &[u8]) -> String {
 /// - Type 2 (parent): resets the target to the root (`/`).
 /// - Type 3 (`..`): writes `../`.
 /// - Type 4 (`.`): writes `./`.
-/// - Type 5 (name): a CS0-encoded identifier decoded with
-///   [`decode_osta_cs0`], followed by `/`.
+/// - Type 5 (name): an OSTA CS0-encoded identifier (compression ID 8 or 16),
+///   followed by `/`.
 /// - Unknown types: the kernel's `switch` has no `default:` arm, so only the
 ///   4-byte header is consumed and the identifier bytes are read as the next
 ///   record header. Skipping the identifier too would resynchronize the walk
