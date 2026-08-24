@@ -72,6 +72,21 @@ fn kind_of_file_type(file_type: u8) -> NodeKind {
     }
 }
 
+/// The most a File Identifier Descriptor alone can say about a child's kind.
+///
+/// A FID records only a directory characteristic bit, so a non-directory child
+/// whose own File Entry could not be read is genuinely **unclassified** — it is
+/// not evidence of a regular file. Reporting [`NodeKind::Other`] keeps "we could
+/// not read the record" distinct from "the record said regular file".
+#[cfg(feature = "vfs")]
+fn kind_from_fid_only(is_dir: bool) -> NodeKind {
+    if is_dir {
+        NodeKind::Dir
+    } else {
+        NodeKind::Other
+    }
+}
+
 /// Per-node metadata harvested from a parent File Identifier Descriptor and
 /// cached by File Entry LBA.
 #[derive(Clone, Copy)]
@@ -232,11 +247,7 @@ impl<R: Read + Seek + Send> UdfVfs<R> {
                 // the FID's directory bit, which is all the parent records.
                 None => FeMeta {
                     is_dir: c.is_dir,
-                    kind: if c.is_dir {
-                        NodeKind::Dir
-                    } else {
-                        NodeKind::Other
-                    },
+                    kind: kind_from_fid_only(c.is_dir),
                     size: c.size,
                 },
             };
@@ -479,6 +490,96 @@ mod tests {
     }
 
     #[test]
+    fn a_child_whose_file_entry_is_unreadable_is_unclassified_not_a_file() {
+        // Truncating the image below the last two File Entries leaves the
+        // directory listing intact but makes those children's own records
+        // unreachable. The reader must then say Other — "we could not read the
+        // record" — rather than File, which would assert something the volume
+        // never stated.
+        //
+        // File Entry offsets in this fixture: nodes/ 137216, symlink 137728,
+        // chardev 138240, blockdev 138752, fifo 139264, socket 139776.
+        let path = format!(
+            "{}/tests/data/udf_all_node_types.img",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        // The fixture is committed, not gitignored, so its absence is a failure
+        // rather than a reason to skip.
+        let full = std::fs::read(&path).expect("udf_all_node_types.img committed");
+        let fs = UdfVfs::open(Cursor::new(full[..139_000].to_vec()))
+            .expect("truncated image still mounts");
+        let nodes = fs
+            .read_dir(fs.root())
+            .expect("root read_dir")
+            .filter_map(Result::ok)
+            .find(|e| e.name == b"nodes")
+            .map(|e| e.id)
+            .expect("nodes/ still listed");
+        let kinds: Vec<_> = fs
+            .read_dir(nodes)
+            .expect("nodes read_dir")
+            .filter_map(Result::ok)
+            .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.kind))
+            .collect();
+        for (name, kind) in &kinds {
+            if name == "fifo" || name == "socket" {
+                assert_eq!(
+                    *kind,
+                    NodeKind::Other,
+                    "{name}: File Entry past EOF must read as unclassified"
+                );
+            }
+        }
+        // The children whose File Entries survive still classify normally, so
+        // the fallback is scoped to the unreadable ones rather than poisoning
+        // the whole listing.
+        assert!(
+            kinds
+                .iter()
+                .any(|(n, k)| n == "chardev" && *k == NodeKind::CharDevice),
+            "a readable child still classifies: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn a_fid_alone_cannot_classify_a_non_directory() {
+        // The FID records one bit. A directory is knowable from it; anything
+        // else is unclassified, and must not be reported as a regular file.
+        assert_eq!(kind_from_fid_only(true), NodeKind::Dir);
+        assert_eq!(kind_from_fid_only(false), NodeKind::Other);
+    }
+
+    #[test]
+    fn icb_file_type_maps_to_its_node_kind() {
+        // The whole ECMA-167 4/14.6.6 mapping, including the arms the fixture
+        // cannot reach.
+        for (ft, want) in [
+            (FILE_TYPE_DIRECTORY, NodeKind::Dir),
+            (crate::FILE_TYPE_REGULAR, NodeKind::File),
+            (FILE_TYPE_BLOCK_DEVICE, NodeKind::BlockDevice),
+            (FILE_TYPE_CHAR_DEVICE, NodeKind::CharDevice),
+            (FILE_TYPE_FIFO, NodeKind::Fifo),
+            (FILE_TYPE_SOCKET, NodeKind::Socket),
+            (FILE_TYPE_LINK, NodeKind::Symlink),
+        ] {
+            assert_eq!(kind_of_file_type(ft), want, "file_type 0x{ft:02x}");
+        }
+        // A type this reader does not model reads as Other, never File —
+        // "the format said something we do not model" and "the format said
+        // regular file" are different observations. 0x00 is unspecified, 0x03
+        // an indirect entry, 0x08 extended attributes, 0x0B a terminal entry
+        // and 0x0D a stream directory: all real ECMA-167 types, none a node
+        // kind this trait models.
+        for ft in [0x00, 0x01, 0x02, 0x03, 0x08, 0x0b, 0x0d, 0xff] {
+            assert_eq!(
+                kind_of_file_type(ft),
+                NodeKind::Other,
+                "unmodelled file_type 0x{ft:02x} must not read as File"
+            );
+        }
+    }
+
+    #[test]
     fn every_non_regular_node_type_is_classified() {
         // UDF records the node type in one ICB byte (ECMA-167 4/14.6.6, and
         // the kernel's fs/udf/ecma_167.h):
@@ -527,7 +628,7 @@ mod tests {
             let e = children
                 .iter()
                 .find(|e| e.name == name)
-                .unwrap_or_else(|| panic!("{} present", String::from_utf8_lossy(name)));
+                .expect("every node type present under nodes/");
             assert_eq!(
                 e.kind,
                 want,
@@ -542,6 +643,22 @@ mod tests {
                 "meta kind for {}",
                 String::from_utf8_lossy(name)
             );
+            // read_link is for link targets. Only the symlink has one; a
+            // device, FIFO or socket must read as empty rather than as an
+            // error or a fabricated path.
+            let target = fs.read_link(e.id, 4096).expect("read_link");
+            if want == NodeKind::Symlink {
+                assert_eq!(
+                    target, b"../README.txt",
+                    "the symlink's target is the driver's own resolution"
+                );
+            } else {
+                assert!(
+                    target.is_empty(),
+                    "{} carries no link target",
+                    String::from_utf8_lossy(name)
+                );
+            }
         }
     }
 
