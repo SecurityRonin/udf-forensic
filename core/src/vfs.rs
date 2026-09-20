@@ -44,7 +44,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use forensic_vfs::{
     Allocation, ByteRun, DirEntry as VfsDirEntry, DirStream, ExtentStream, FileId, FileSystem,
     FsKind, FsMeta, MacbTimes, NodeKind, NodeStream, ResidencyKind, RunAlloc, RunFlags, RunInfo,
-    SectorSizes, SmallHex, StreamId, TimeZonePolicy, VfsError, VfsResult,
+    SectorSizes, SmallHex, StreamId, StreamInfo, StreamKind, TimeZonePolicy, VfsError, VfsResult,
 };
 
 use crate::{
@@ -360,8 +360,67 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
         })
     }
 
+    /// The file's contents, plus one entry per extended attribute.
+    ///
+    /// UDF attributes are TYPED records, not name/value pairs, so only
+    /// Implementation Use and Application Use carry a name; the rest are
+    /// reported with `name: None`. That is deliberate -- the format gives them
+    /// no name, and a synthetic label would read as one the image contained.
+    ///
+    /// Every record is listed regardless of type. A consumer that cannot
+    /// interpret a File Times record can still SEE it, which is what stops "no
+    /// attributes" being reported for a file that has some.
+    fn data_streams(&self, ino: FileId) -> VfsResult<Vec<StreamInfo>> {
+        let fe_lba = fe_lba_of(ino)?;
+        let block_size = self.state.block_size;
+        let mut inner = self.lock();
+        let meta = Self::resolve(&mut inner, fe_lba, block_size)?;
+        let mut out = vec![StreamInfo {
+            id: StreamId::Default,
+            name: None,
+            size: meta.size,
+            residency: ResidencyKind::NonResident,
+            kind: StreamKind::Data,
+        }];
+        let eas = crate::read_fe_extended_attributes(&mut inner.reader, block_size, fe_lba)
+            .unwrap_or_default();
+        for (i, ea) in eas.iter().enumerate() {
+            out.push(StreamInfo {
+                id: StreamId::Xattr(u16::try_from(i).unwrap_or(u16::MAX)),
+                name: ea.name().map(|n| n.as_bytes().to_vec()),
+                size: ea.value().len() as u64,
+                residency: ResidencyKind::Resident {
+                    inline_len: u32::try_from(ea.value().len()).unwrap_or(u32::MAX),
+                },
+                kind: StreamKind::Xattr,
+            });
+        }
+        Ok(out)
+    }
+
     fn read_at(&self, ino: FileId, stream: StreamId, off: u64, buf: &mut [u8]) -> VfsResult<usize> {
         let fe_lba = fe_lba_of(ino)?;
+        // Attributes are dispatched BEFORE the default-stream guard: that guard
+        // refuses stream kinds UDF does not have, and attributes are one it does.
+        if let StreamId::Xattr(idx) = stream {
+            let block_size = self.state.block_size;
+            let mut inner = self.lock();
+            Self::resolve(&mut inner, fe_lba, block_size)?;
+            let eas = crate::read_fe_extended_attributes(&mut inner.reader, block_size, fe_lba)
+                .unwrap_or_default();
+            let ea = eas.get(idx as usize).ok_or_else(|| VfsError::Unsupported {
+                layer: "udf xattr index",
+                scheme: format!("attribute {idx} of {}", eas.len()),
+            })?;
+            let value = ea.value();
+            let start = usize::try_from(off).unwrap_or(usize::MAX);
+            let Some(avail) = value.get(start..) else {
+                return Ok(0);
+            };
+            let n = avail.len().min(buf.len());
+            buf[..n].copy_from_slice(&avail[..n]);
+            return Ok(n);
+        }
         require_default_stream(stream)?;
         let block_size = self.state.block_size;
         let partition_start = self.state.partition_start;

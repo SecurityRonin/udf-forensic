@@ -35,7 +35,35 @@ on any udftools 2.3 host.
 - **Size / MD5:** 8 388 608 bytes - `1258d2b17f095af79bdb1141059eac84`
 - **Consumed by:** `src/lib.rs` `mod real_media_tests` -> `vat_image_classified_virtual`
   (asserts `UdfPartitionKind::Virtual`) and `vat_image_matches_udfinfo_oracle`
-  (asserts `partition_start == 257`, `partition_map_count == 2`).
+  (asserts `partition_start == 257`, `partition_map_count == 2`); and
+  `tests/extended_attributes.rs`, which decodes the EA space described below.
+- **It also carries the only extended attributes in this corpus**, which went
+  unnoticed until the EA decoder was written. The File Entry at byte offset
+  **612 352** (tag 261) declares `L_EA = 220`:
+
+  | | |
+  |---|---|
+  | EA Header Descriptor | tag 262, `ImplementationAttributesLocation = 24`, `ApplicationAttributesLocation = 220` |
+  | one record | type **2048** (Implementation Use), subtype 1, length **196** |
+  | `EntityID` | `*UDF VAT LVExtension` |
+  | payload | `ImplementationUseLength = 146`, at offset 48 |
+
+  The arithmetic closes: 16-byte common header + 32-byte `EntityID` + 146 =
+  194, padded to the 4-byte boundary = 196 = the declared length; and
+  24 + 196 = 220 = `L_EA`.
+
+- **Reproducible.** Re-running the generator command above in a clean
+  `debian:bookworm-slim` container produces an image with the EA at the same
+  offset and the same shape, so this is a `mkudffs`-written structure rather
+  than an artifact of one run.
+- **What this fixture CANNOT validate.** `mkudffs` writes no File Times,
+  Alternate Permissions, Character Set Information or Application Use
+  attributes at any media type / revision it accepts (`hd` and `cdr` x `0x0150`
+  and `0x0201`; it rejects `dvd` and `0x0260` outright). Those record types are
+  therefore decoded structurally only — type, subtype, length and raw bytes —
+  and are surfaced as `UdfEaKind::Other` rather than interpreted. UDF EAs cannot
+  be written with `setfattr`, and the Linux UDF driver does not expose them as
+  xattrs, so no mount-based route to richer samples exists either.
 - **`udfinfo` oracle output (independent ground truth):**
   ```
   udfinfo: Error: Virtual Allocation Table not found, maybe wrong --vatblock?

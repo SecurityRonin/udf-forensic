@@ -48,3 +48,8 @@ too_many_lines           = { level = "allow", priority = 1 }
 items_after_statements   = { level = "allow", priority = 1 }
 similar_names            = { level = "allow", priority = 1 }
 manual_let_else          = { level = "allow", priority = 1 }
+
+# TEMPORARY, remove before publish: StreamKind::Data is on forensic-vfs main and
+# not yet released. Tracked in ADR-0020 / the forensic-vfs 0.9 migration.
+[patch.crates-io]
+forensic-vfs = { path = "../forensic-vfs/crates/core" }

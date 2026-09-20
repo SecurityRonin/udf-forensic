@@ -32,3 +32,7 @@ forensic-vfs = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "extended_attributes"
+required-features = ["vfs"]

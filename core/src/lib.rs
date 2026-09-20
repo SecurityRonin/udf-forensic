@@ -25,6 +25,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 #[cfg(feature = "vfs")]
 pub mod vfs;
+pub mod xattr;
+pub use xattr::{parse_extended_attributes, UdfEaKind, UdfExtendedAttribute};
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -283,6 +285,44 @@ pub fn read_dir_at_lba<R: Read + Seek>(
 ) -> Option<Vec<UdfFileEntry>> {
     let dir_data = read_fe_data(reader, block_size, partition_start, dir_fe_lba)?;
     Some(parse_fids(reader, block_size, partition_start, &dir_data))
+}
+
+/// Read the extended attributes of the File Entry at `fe_lba`.
+///
+/// Returns `None` when the LBA is not a File Entry or its EA space is
+/// malformed; an empty vector when the entry simply has none (`L_EA == 0`),
+/// which is the ordinary case.
+///
+/// The EA area's offset depends on the entry form, exactly as in
+/// [`read_fe_data`]: a base File Entry puts `L_EA` at +168 and the area at
+/// +176, while an Extended File Entry's extra 40 bytes move them to +208 and
+/// +216. Reusing the wrong pair silently reads allocation descriptors as
+/// attributes.
+pub fn read_fe_extended_attributes<R: Read + Seek>(
+    reader: &mut R,
+    block_size: u32,
+    fe_lba: u32,
+) -> Option<Vec<xattr::UdfExtendedAttribute>> {
+    let mut sector = [0u8; MAX_BLOCK_SIZE];
+    let sector = &mut sector[..block_size as usize];
+    seek_read(reader, u64::from(fe_lba) * u64::from(block_size), sector)?;
+
+    let tag_ident = u16::from_le_bytes([sector[0], sector[1]]);
+    let is_efe = tag_ident == TAG_EFE;
+    if tag_ident != TAG_FE && tag_ident != TAG_FE_ALT && !is_efe {
+        return None;
+    }
+    let (ea_off, header) = if is_efe {
+        (208usize, 216usize)
+    } else {
+        (168usize, 176usize)
+    };
+    let ea_len = le_u32(sector, ea_off) as usize;
+    if ea_len == 0 {
+        return Some(Vec::new());
+    }
+    let ea = sector.get(header..header.checked_add(ea_len)?)?;
+    xattr::parse_extended_attributes(ea)
 }
 
 /// Read the data extent of the File Entry at `fe_lba`.
