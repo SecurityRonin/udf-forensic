@@ -509,6 +509,98 @@ mod tests {
     /// reader fully resolves for data reads. See `tests/data/README.md`.
     const PLAIN: &str = "udf_plain.img";
 
+    /// The synthetic image with an extended-attribute space on `inline.txt`: a
+    /// header descriptor carrying `header_tag` (262 is the real one), a named
+    /// Implementation Use record whose value is `hello`, and an unnamed File
+    /// Times record (type 5), laid out as ECMA-167 4/14.10 and `xattr.rs` read it.
+    fn image_with_eas(header_tag: u16) -> Vec<u8> {
+        use crate::test_support::{BS, INLINE_FILE_FE};
+        let mut ea = vec![0u8; 24];
+        ea[0..2].copy_from_slice(&header_tag.to_le_bytes());
+        let mut imp = vec![0u8; 53]; // 16 header + 32 EntityID + 5 value
+        imp[0..4].copy_from_slice(&2048u32.to_le_bytes());
+        imp[4] = 1;
+        imp[8..12].copy_from_slice(&53u32.to_le_bytes());
+        imp[12..16].copy_from_slice(&5u32.to_le_bytes()); // ImplementationUseLength
+        imp[17..26].copy_from_slice(b"*UDF Test"); // EntityID identifier, past flags
+        imp[48..53].copy_from_slice(b"hello");
+        ea.extend_from_slice(&imp);
+        let mut times = vec![0u8; 16];
+        times[0..4].copy_from_slice(&5u32.to_le_bytes());
+        times[4] = 1;
+        times[8..12].copy_from_slice(&16u32.to_le_bytes());
+        ea.extend_from_slice(&times);
+
+        let mut img = crate::test_support::image();
+        let o = INLINE_FILE_FE as usize * BS;
+        let area = o + 176;
+        img[o + 168..o + 172].copy_from_slice(&(ea.len() as u32).to_le_bytes()); // L_EA
+        img[o + 172..o + 176].copy_from_slice(&4u32.to_le_bytes()); // L_AD
+        img[area..area + ea.len()].copy_from_slice(&ea);
+        img[area + ea.len()..area + ea.len() + 4].copy_from_slice(b"abcd");
+        img
+    }
+
+    fn inline_file(fs: &UdfVfs<Cursor<Vec<u8>>>) -> FileId {
+        fs.read_dir(fs.root())
+            .expect("root read_dir")
+            .map(|e| e.expect("entry"))
+            .find(|e| e.name == b"inline.txt")
+            .expect("inline.txt present")
+            .id
+    }
+
+    #[test]
+    fn data_streams_lists_every_extended_attribute_named_or_not() {
+        let fs = UdfVfs::open(Cursor::new(image_with_eas(262))).expect("open synthetic image");
+        let id = inline_file(&fs);
+        let streams = fs.data_streams(id).expect("data_streams");
+        assert_eq!(streams.len(), 3, "contents + two attributes: {streams:?}");
+        assert!(matches!(streams[0].id, StreamId::Default));
+        assert_eq!(streams[0].size, 4);
+        assert!(matches!(streams[1].id, StreamId::Xattr(0)));
+        assert!(matches!(streams[1].kind, StreamKind::Xattr));
+        assert_eq!(streams[1].name.as_deref(), Some(&b"*UDF Test"[..]));
+        assert_eq!(streams[1].size, 5);
+        assert!(matches!(streams[2].id, StreamId::Xattr(1)));
+        assert_eq!(streams[2].name, None, "a File Times record has no name");
+        assert_eq!(streams[2].size, 16, "an unnamed record's value is the whole record");
+
+        let mut buf = [0u8; 16];
+        assert_eq!(fs.read_at(id, StreamId::Xattr(0), 0, &mut buf).expect("read"), 5);
+        assert_eq!(&buf[..5], b"hello");
+        assert_eq!(fs.read_at(id, StreamId::Xattr(0), 3, &mut buf).expect("read"), 2);
+        assert_eq!(&buf[..2], b"lo");
+        assert_eq!(fs.read_at(id, StreamId::Xattr(0), 99, &mut buf).expect("past end"), 0);
+        assert_eq!(fs.read_at(id, StreamId::Xattr(1), 0, &mut buf).expect("read"), 16);
+        let err = fs
+            .read_at(id, StreamId::Xattr(7), 0, &mut buf)
+            .expect_err("there is no attribute 7");
+        assert!(err.to_string().contains("attribute 7 of 2"), "{err}");
+        // The attribute space precedes the inline data; the contents still read.
+        assert_eq!(fs.read_at(id, StreamId::Default, 0, &mut buf).expect("read"), 4);
+        assert_eq!(&buf[..4], b"abcd");
+    }
+
+    #[test]
+    fn a_damaged_extended_attribute_space_is_loud_not_empty() {
+        // parse_extended_attributes returns None when the space is present but
+        // does not begin with an Extended Attribute Header Descriptor (tag 262):
+        // "reporting 'no attributes' for it would hide the damage". The adapter
+        // must surface that, not list the file as having no attributes.
+        let fs = UdfVfs::open(Cursor::new(image_with_eas(0))).expect("open synthetic image");
+        let id = inline_file(&fs);
+        let err = fs
+            .data_streams(id)
+            .expect_err("a damaged attribute space must not read as none");
+        assert!(err.to_string().contains("extended-attribute"), "{err}");
+        let mut buf = [0u8; 8];
+        let err = fs
+            .read_at(id, StreamId::Xattr(0), 0, &mut buf)
+            .expect_err("a damaged attribute space must not read as attribute-not-found");
+        assert!(err.to_string().contains("extended-attribute"), "{err}");
+    }
+
     fn open_plain() -> Option<UdfVfs<File>> {
         let path = format!("{}/../tests/data/{}", env!("CARGO_MANIFEST_DIR"), PLAIN);
         let f = File::open(path).ok()?;
