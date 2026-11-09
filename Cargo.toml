@@ -14,7 +14,7 @@ homepage = "https://github.com/SecurityRonin/udf-forensic"
 readme = "README.md"
 
 [workspace.dependencies]
-udf-core = { version = "0.1.0", path = "core" }
+udf-core = { version = "0.2.0", path = "core" }
 forensicnomicon = "1"
 # The fleet's single audited bounds-checked integer reader (no_std, forbid(unsafe),
 # fuzzed): fixed-width reads return 0 out of range instead of panicking.
