@@ -1579,6 +1579,25 @@ mod synth_traversal_tests {
     }
 
     #[test]
+    fn read_fe_data_stops_reading_once_the_information_length_is_met() {
+        // An extent's recorded length is image-controlled and may exceed the
+        // data it holds; here it is the 30-bit maximum (1 GiB), far past the end
+        // of the 135 KB image. The 600 bytes the File Entry records all sit in
+        // its first two blocks, so the reader must stop there rather than keep
+        // seeking through the rest of the extent and fail at end of image.
+        let mut img = ts::image();
+        let ad = ts::SHORT_FILE_FE as usize * ts::BS + 176;
+        img[ad..ad + 4].copy_from_slice(&0x3FFF_FFFFu32.to_le_bytes());
+        let mut r = Cursor::new(img);
+        let st = parse_udf_state(&mut r).unwrap();
+        let data = read_fe_data(&mut r, st.block_size, st.partition_start, ts::SHORT_FILE_FE)
+            .expect("the 600 recorded bytes are readable");
+        assert_eq!(data.len() as u64, ts::SHORT_FILE_LEN);
+        assert!(data[..512].iter().all(|&b| b == 0x41));
+        assert!(data[512..].iter().all(|&b| b == 0x42));
+    }
+
+    #[test]
     fn read_fe_data_reads_long_extents() {
         let mut r = Cursor::new(ts::image());
         let st = parse_udf_state(&mut r).unwrap();

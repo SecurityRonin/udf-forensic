@@ -523,6 +523,46 @@ mod tests {
     }
 
     #[test]
+    fn a_symlink_longer_than_one_block_is_refused_loud() {
+        // Linux refuses a UDF symlink whose path data exceeds one logical block
+        // (fs/udf/symlink.c: "We don't support symlinks longer than one
+        // block", -ENAMETOOLONG). The Information Length is image-controlled
+        // and sizes the read, so honouring a larger one would let a hostile
+        // link pull in far more than the caller's cap before truncation.
+        use crate::test_support::{BS, SYMLINK_FE};
+        let mut img = crate::test_support::image();
+        let declared = BS as u64 + 1;
+        let o = SYMLINK_FE as usize * BS;
+        img[o + 34..o + 36].copy_from_slice(&0u16.to_le_bytes()); // short allocation
+        img[o + 56..o + 64].copy_from_slice(&declared.to_le_bytes());
+        img[o + 172..o + 176].copy_from_slice(&8u32.to_le_bytes()); // L_AD: one short_ad
+        img[o + 176..o + 180].copy_from_slice(&(declared as u32).to_le_bytes());
+        img[o + 180..o + 184].copy_from_slice(&16u32.to_le_bytes()); // data at LBA 16
+        for rec in img[16 * BS..18 * BS].chunks_exact_mut(4) {
+            rec.copy_from_slice(&[4, 0, 0, 0]); // "." components
+        }
+        let fs = UdfVfs::open(Cursor::new(img)).expect("open synthetic image");
+        let children: Vec<_> = fs
+            .read_dir(fs.root())
+            .expect("root read_dir")
+            .map(|e| e.expect("entry"))
+            .collect();
+        let link = children
+            .iter()
+            .find(|e| e.name == b"lnk")
+            .expect("synthetic symlink present");
+        assert_eq!(link.kind, NodeKind::Symlink);
+        let err = fs
+            .read_link(link.id, 4096)
+            .expect_err("a symlink longer than one block must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("513") && msg.contains("512"),
+            "error must name the declared length and the block size: {msg}"
+        );
+    }
+
+    #[test]
     fn synthetic_symlink_with_unreadable_data_is_loud() {
         // Break the symlink File Entry's allocation descriptors (ICB flags to
         // an unknown allocation type) while leaving the file-type byte intact:
