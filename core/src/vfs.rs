@@ -455,6 +455,24 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
             // for non-link nodes).
             return Ok(Vec::new());
         }
+        // The Information Length is image-controlled and sizes the data read, so
+        // it is checked before anything is read. Linux refuses a symlink longer
+        // than one logical block (fs/udf/symlink.c, -ENAMETOOLONG); so do we,
+        // which keeps the read below to at most one block.
+        if let Some(info_len) = crate::read_fe_info_len(&mut inner.reader, block_size, fe_lba) {
+            if info_len > u64::from(block_size) {
+                return Err(VfsError::Decode {
+                    layer: "udf",
+                    offset: u64::from(fe_lba) * u64::from(block_size) + 56,
+                    detail: format!(
+                        "symbolic link File Entry at LBA {fe_lba} declares {info_len} bytes \
+                         of path data, more than one {block_size}-byte block (Linux \
+                         refuses such a link with ENAMETOOLONG)"
+                    ),
+                    bytes: SmallHex::new(&info_len.to_le_bytes()),
+                });
+            }
+        }
         let data = read_fe_data(&mut inner.reader, block_size, partition_start, fe_lba)
             .ok_or_else(|| VfsError::Decode {
                 layer: "udf",
@@ -462,9 +480,8 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
                 detail: format!("symbolic link File Entry at LBA {fe_lba} could not be read"),
                 bytes: SmallHex::new(&[]),
             })?;
-        // Every component length in the chain is image-controlled, so a hostile
-        // link must not allocate past what the caller asked for (matches the
-        // ext4/xfs/ufs/btrfs/zfs adapters).
+        // The decoded target is at most a few times one block (a CS0 byte can
+        // decode to a 3-byte replacement character); `cap` bounds what is returned.
         let mut target = crate::decode_symlink_target(&data).into_bytes();
         target.truncate(cap);
         Ok(target)

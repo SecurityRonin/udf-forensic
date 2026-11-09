@@ -803,11 +803,15 @@ fn read_extent<R: Read + Seek>(
     let bs = block_size as usize;
     let sectors = ext_len.div_ceil(bs);
     for i in 0..sectors {
+        // `ext_len` is image-controlled and may run far past the recorded data
+        // (up to 1 GiB per descriptor); stop once `total_len` is satisfied.
+        let remaining = total_len.saturating_sub(data.len() as u64) as usize;
+        if remaining == 0 {
+            break;
+        }
         let mut sector = [0u8; MAX_BLOCK_SIZE];
         let sector = &mut sector[..bs];
         seek_read(reader, byte_pos + i as u64 * u64::from(block_size), sector)?;
-        let already = data.len() as u64;
-        let remaining = total_len.saturating_sub(already) as usize;
         let sector_bytes = (ext_len - i * bs).min(bs);
         let take = sector_bytes.min(remaining);
         data.extend_from_slice(&sector[..take]);
