@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/SecurityRonin/udf-forensic/compare/udf-forensic-v0.3.0...udf-forensic-v0.4.0) - 2026-11-09
+
+### Documentation
+
+- *(forensic)* [**breaking**] record that the reader re-export makes this release breaking
+
 ## [0.3.0](https://github.com/SecurityRonin/udf-forensic/compare/udf-forensic-v0.2.8...udf-forensic-v0.3.0) - 2026-08-24
 
 ### Other

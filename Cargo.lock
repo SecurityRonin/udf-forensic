@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "udf-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "forensic-vfs",
  "safe-read",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "udf-forensic"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "forensicnomicon",
  "serde",
