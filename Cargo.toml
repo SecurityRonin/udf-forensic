@@ -20,8 +20,6 @@ forensicnomicon = "1"
 # fuzzed): fixed-width reads return 0 out of range instead of panicking.
 safe-read = "0.1"
 serde = { version = "1", features = ["derive"] }
-# forensic-vfs (KNOWLEDGE leaf) — the read-only FileSystem navigation contract.
-forensic-vfs = { version = "0.9" }
 
 # The full fleet base tier, shared by both members. Both parse untrusted,
 # attacker-controllable UDF images, so an unwrap/expect in production is a
@@ -48,8 +46,3 @@ too_many_lines           = { level = "allow", priority = 1 }
 items_after_statements   = { level = "allow", priority = 1 }
 similar_names            = { level = "allow", priority = 1 }
 manual_let_else          = { level = "allow", priority = 1 }
-
-# TEMPORARY, remove before publish: StreamKind::Data is on forensic-vfs main and
-# not yet released. Tracked in ADR-0020 / the forensic-vfs 0.9 migration.
-[patch.crates-io]
-forensic-vfs = { path = "../forensic-vfs/crates/core" }

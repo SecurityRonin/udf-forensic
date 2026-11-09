@@ -28,7 +28,10 @@ serde = { workspace = true, optional = true }
 # the adapter. Note: this reader carries NO `forensicnomicon` dependency — that
 # lives with the analyzer in udf-forensic, keeping udf-core lean for a consumer
 # that only reads a volume.
-forensic-vfs = { workspace = true, optional = true }
+# The read-only FileSystem navigation contract. 0.10 is the first release with
+# StreamKind::Data, which the adapter uses; it is a public dependency of the
+# `vfs` feature, so moving it is a breaking change for that feature's users.
+forensic-vfs = { version = "0.10", optional = true }
 
 [lints]
 workspace = true
