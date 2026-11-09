@@ -20,7 +20,9 @@
 pub mod findings;
 
 /// The complete `udf-core` reader surface, re-exported so this crate stays a
-/// drop-in for consumers that depended on the reader when it lived here.
+/// drop-in for consumers that depended on the reader when it lived here. That
+/// makes `udf-core` a public dependency: moving to an incompatible `udf-core`
+/// changes this crate's API as well.
 pub use udf_core::*;
 
 /// The canonical 5-level severity scale, re-exported at the crate root for
