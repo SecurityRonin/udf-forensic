@@ -173,6 +173,27 @@ fn require_default_stream(stream: StreamId) -> VfsResult<()> {
     }
 }
 
+/// The File Entry's extended attributes. `read_fe_extended_attributes` gives
+/// an empty list for a File Entry with no attribute space and `None` when the
+/// space is present but cannot be read or parsed; that `None` is an error here,
+/// never "no attributes", which would hide the damage.
+fn extended_attributes<R: Read + Seek>(
+    reader: &mut R,
+    block_size: u32,
+    fe_lba: u32,
+) -> VfsResult<Vec<crate::xattr::UdfExtendedAttribute>> {
+    crate::read_fe_extended_attributes(reader, block_size, fe_lba).ok_or_else(|| VfsError::Decode {
+        layer: "udf",
+        offset: u64::from(fe_lba) * u64::from(block_size),
+        detail: format!(
+            "File Entry at LBA {fe_lba} has an extended-attribute space that cannot be \
+                 read or parsed: L_EA overruns the {block_size}-byte block, or the space does \
+                 not begin with an Extended Attribute Header Descriptor (tag 262)"
+        ),
+        bytes: SmallHex::new(&[]),
+    })
+}
+
 impl<R: Read + Seek + Send> UdfVfs<R> {
     /// Resolve the cached `FeMeta` for `fe_lba`, or — for an uncached FE — read
     /// its File Entry, classify it from the ICB Tag File Type, and cache it. A
@@ -382,8 +403,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
             residency: ResidencyKind::NonResident,
             kind: StreamKind::Data,
         }];
-        let eas = crate::read_fe_extended_attributes(&mut inner.reader, block_size, fe_lba)
-            .unwrap_or_default();
+        let eas = extended_attributes(&mut inner.reader, block_size, fe_lba)?;
         for (i, ea) in eas.iter().enumerate() {
             out.push(StreamInfo {
                 id: StreamId::Xattr(u16::try_from(i).unwrap_or(u16::MAX)),
@@ -406,8 +426,7 @@ impl<R: Read + Seek + Send> FileSystem for UdfVfs<R> {
             let block_size = self.state.block_size;
             let mut inner = self.lock();
             Self::resolve(&mut inner, fe_lba, block_size)?;
-            let eas = crate::read_fe_extended_attributes(&mut inner.reader, block_size, fe_lba)
-                .unwrap_or_default();
+            let eas = extended_attributes(&mut inner.reader, block_size, fe_lba)?;
             let ea = eas.get(idx as usize).ok_or_else(|| VfsError::Unsupported {
                 layer: "udf xattr index",
                 scheme: format!("attribute {idx} of {}", eas.len()),
@@ -564,21 +583,44 @@ mod tests {
         assert_eq!(streams[1].size, 5);
         assert!(matches!(streams[2].id, StreamId::Xattr(1)));
         assert_eq!(streams[2].name, None, "a File Times record has no name");
-        assert_eq!(streams[2].size, 16, "an unnamed record's value is the whole record");
+        assert_eq!(
+            streams[2].size, 16,
+            "an unnamed record's value is the whole record"
+        );
 
         let mut buf = [0u8; 16];
-        assert_eq!(fs.read_at(id, StreamId::Xattr(0), 0, &mut buf).expect("read"), 5);
+        assert_eq!(
+            fs.read_at(id, StreamId::Xattr(0), 0, &mut buf)
+                .expect("read"),
+            5
+        );
         assert_eq!(&buf[..5], b"hello");
-        assert_eq!(fs.read_at(id, StreamId::Xattr(0), 3, &mut buf).expect("read"), 2);
+        assert_eq!(
+            fs.read_at(id, StreamId::Xattr(0), 3, &mut buf)
+                .expect("read"),
+            2
+        );
         assert_eq!(&buf[..2], b"lo");
-        assert_eq!(fs.read_at(id, StreamId::Xattr(0), 99, &mut buf).expect("past end"), 0);
-        assert_eq!(fs.read_at(id, StreamId::Xattr(1), 0, &mut buf).expect("read"), 16);
+        assert_eq!(
+            fs.read_at(id, StreamId::Xattr(0), 99, &mut buf)
+                .expect("past end"),
+            0
+        );
+        assert_eq!(
+            fs.read_at(id, StreamId::Xattr(1), 0, &mut buf)
+                .expect("read"),
+            16
+        );
         let err = fs
             .read_at(id, StreamId::Xattr(7), 0, &mut buf)
             .expect_err("there is no attribute 7");
         assert!(err.to_string().contains("attribute 7 of 2"), "{err}");
         // The attribute space precedes the inline data; the contents still read.
-        assert_eq!(fs.read_at(id, StreamId::Default, 0, &mut buf).expect("read"), 4);
+        assert_eq!(
+            fs.read_at(id, StreamId::Default, 0, &mut buf)
+                .expect("read"),
+            4
+        );
         assert_eq!(&buf[..4], b"abcd");
     }
 
